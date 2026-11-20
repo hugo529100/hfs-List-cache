@@ -1,0 +1,182 @@
+/* List-cache 3.5 — native-looking pager (25px), compact header sticker,
+ * and native HFS search / filter over the frozen listing.
+ *
+ * The pager sits where the native one sits (inside .bottom-bar-stack-positioner) and
+ * copies the native look: background var(--bg), buttons var(--button-bg), highlighted
+ * (.toggled) buttons. Its total height is fixed to 25px; page buttons grow to fill the
+ * row and scroll horizontally when they don't fit.
+ *
+ * #paging and #folder-stats are only hidden while the lazy frozen view is shown. When the
+ * native filter bar is active (body.lc-filtering) the native paging bar and native stats
+ * come back and the plugin pager goes away, so filtering behaves exactly like HFS.
+ * #folder-stats is never overwritten: React keeps its own text nodes there, and writing
+ * to it used to leave the old folder's record on screen after going back to a normal
+ * folder. The frozen record lives in its own #lc-stats element instead.
+ */
+
+body.lc-frozen #paging {
+    display: none !important;
+}
+
+body.lc-frozen #folder-stats {
+    display: none !important;
+}
+
+/* native filter mode: native paging + native stats, no plugin pager/sticker */
+body.lc-frozen.lc-filtering #paging {
+    display: flex !important;
+}
+
+body.lc-frozen.lc-filtering #folder-stats {
+    display: block !important;
+}
+
+body.lc-frozen.lc-filtering #lc-stats {
+    display: none !important;
+}
+
+body.lc-frozen.lc-filtering #lc-paging {
+    display: none !important;
+}
+
+#lc-paging {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    background-color: transparent;
+    height: 25px;
+    max-height: 25px;
+    box-sizing: border-box;
+    position: static;
+    min-width: 0;
+}
+
+#lc-paging > button {
+    z-index: 1;
+    flex: 0 0 auto;
+    height: 21px;
+    padding: 0 .4em;
+    line-height: 21px;
+    font-size: 12px;
+    align-self: flex-start;
+}
+
+#lc-paging #lc-paging-middle {
+    padding: 0 .45em 3px;
+    margin: 0 -0.2em;
+    display: flex;
+    gap: 1px;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 25px;
+    box-sizing: border-box;
+    align-items: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-behavior: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--text) transparent;
+}
+
+/* grow to fill the row when they fit; keep a minimum and scroll when they don't */
+#lc-paging #lc-paging-middle > button {
+    flex: 1 0 auto;
+    min-width: 2.6em;
+    height: 21px;
+    padding: 0 .4em;
+    line-height: 21px;
+    font-size: 12px;
+}
+
+#lc-paging button {
+    background: var(--button-bg);
+    border-radius: 0.4em 0.4em 0 0;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* paging buttons have no hover effect at all (no solid highlight, no outline, no bottom edge) */
+#lc-paging button:hover,
+#lc-paging button:focus,
+#lc-paging button:focus-visible {
+    background: var(--button-bg);
+    color: var(--button-text);
+    border-bottom: 0 !important;
+    border-bottom-style: none !important;
+    border-bottom-color: transparent !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+#lc-paging button.toggled {
+    border: 1px solid var(--good-contrast);
+    border-radius: 0.4em;
+}
+
+/* paging buttons: no bottom edge and no bottom-corner rounding */
+#lc-paging button,
+#lc-paging button:hover,
+#lc-paging button.toggled {
+    border-bottom: 0 !important;
+    border-bottom-style: none !important;
+    border-bottom-left-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+}
+
+/* the selected page keeps its bottom open too, including any focus ring */
+#lc-paging button.toggled {
+    border-bottom: 0 !important;
+    border-bottom-style: none !important;
+    border-bottom-left-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+#lc-paging button:focus,
+#lc-paging button:focus-visible {
+    outline: none !important;
+}
+
+/* thin scrollbar lying on the bottom surface of the paging bar (desktop only) */
+#lc-paging #lc-paging-middle::-webkit-scrollbar {
+    height: 4px;
+}
+
+#lc-paging #lc-paging-middle::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#lc-paging #lc-paging-middle::-webkit-scrollbar-thumb {
+    background: rgba(160, 160, 160, .55);
+    border-radius: 2px;
+}
+
+@media (pointer: coarse), (hover: none) {
+    #lc-paging #lc-paging-middle {
+        scrollbar-width: none;
+    }
+
+    #lc-paging #lc-paging-middle::-webkit-scrollbar {
+        display: none;
+    }
+}
+
+/*
+ * The frozen record is a small sticker in the header: three lines whose height fills the
+ * header button height, right aligned, first line top and last line bottom aligned.
+ * --lc-header-btn-h is set from the real header button height.
+ */
+body.lc-frozen #lc-stats {
+    float: right;
+    display: block;
+    box-sizing: border-box;
+    height: var(--lc-header-btn-h, 34px);
+    line-height: calc(var(--lc-header-btn-h, 34px) / 3);
+    font-size: calc(var(--lc-header-btn-h, 34px) / 3.8);
+    white-space: pre-line;
+    text-align: right;
+    margin: 0 0 0 .5em;
+    padding: 0;
+    color: var(--text);
+}
