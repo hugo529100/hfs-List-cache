@@ -814,25 +814,33 @@
 
     const firstBuildHinted = new Set()
 
-    // A folder with no frozen copy is being learned by the next plain listing. Ask the
-    // backend whether that capture is already large enough to be frozen, then tell the user
-    // once that this first visit is the slow one.
-    function hintFirstBuild(uri, my, tries) {
-        HFS.customRestCall('lc_meta', { uri }).then(res => {
+    function showFirstBuildHint(uri) {
+        if (firstBuildHinted.has(uri))
+            return
+        firstBuildHinted.add(uri)
+        notify('First visit: building the frozen list. The next visit will open instantly.')
+    }
+
+    // A folder with no frozen copy is being learned by the next plain listing. Use the
+    // lc_meta response already in hand, plus at most one short retry (the capture may start
+    // just after that response). Never poll continuously.
+    function maybeHintFirstBuild(res, uri, my) {
+        if (my !== seq || !res || res.frozen)
+            return
+        if (res.building && res.large) {
+            showFirstBuildHint(uri)
+            return
+        }
+        setTimeout(() => {
             if (my !== seq)
                 return
-            if (!res || res.frozen)
-                return
-            if (res.building && res.large) {
-                if (!firstBuildHinted.has(uri)) {
-                    firstBuildHinted.add(uri)
-                    notify('First visit: building the frozen list. The next visit will open instantly.')
-                }
-                return
-            }
-            if (tries < 30 && (res.building || tries < 8))
-                setTimeout(() => hintFirstBuild(uri, my, tries + 1), 1200)
-        }).catch(() => { /* offline */ })
+            HFS.customRestCall('lc_meta', { uri }).then(next => {
+                if (my !== seq || !next || next.frozen)
+                    return
+                if (next.building && next.large)
+                    showFirstBuildHint(uri)
+            }).catch(() => { /* offline */ })
+        }, 1500)
     }
 
     function onUri(value) {
@@ -845,7 +853,7 @@
             if (my !== seq)
                 return
             if (!res || !res.frozen) {
-                hintFirstBuild(uri, my, 0)
+                maybeHintFirstBuild(res, uri, my)
                 return
             }
             if (!(Number(res.pages) > 1))
