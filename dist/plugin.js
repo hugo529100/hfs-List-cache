@@ -55,6 +55,7 @@
 exports.version = 3.5
 exports.description = "Freezes listings of very big folders and serves them page by page, lazily. The first visit starts building the frozen list; the next visit opens instantly."
 exports.apiRequired = 12.3
+exports.repo = "hugo529100/hfs-List-cache"
 exports.frontend_js = 'main.js'
 exports.frontend_css = 'style.css'
 exports.config = {
