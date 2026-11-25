@@ -1,89 +1,89 @@
 # List-cache
 
-List-cache 是给 [HFS](https://github.com/rejetto/hfs) 使用的列表缓存插件。它把大文件夹的完整文件列表预先取出、切成分页包保存，之后打开该文件夹时不再让 HFS 扫描整个目录，而是直接读取冻结好的列表。
+List-cache is a listing cache plugin for [HFS](https://github.com/rejetto/hfs). It captures the complete file listing of large folders ahead of time, splits it into page packets, and serves those packets on later visits instead of making HFS scan the whole directory again.
 
-适合：
+Typical use cases:
 
-- 几千到几万文件的音乐、图片、备份、离线网站目录
-- 目录扫描很慢、首屏等待明显的文件夹
-- 希望在冻结列表上继续使用 HFS 原生排序、评论、Fixed-folder-order、Hide-file 的场景
+- Music, photo, backup, and offline-website folders with thousands of files
+- Folders where directory scanning makes the first page slow
+- Keeping HFS-native sorting, comments, Fixed-folder-order, and Hide-file behavior on a frozen listing
 
-当前版本：**3.5**  
-存储布局版本：**2.6**  
-要求：HFS **3.4.1**（插件 API 12.3）或兼容版本
-
----
-
-## 功能概览
-
-- 超过阈值的文件夹自动冻结列表，不必手动登记
-- 冻结列表按页切包，支持首屏快速打开
-- 三档处理：小目录不冻结 / 第一级本地完整列表 / 第二级懒加载
-- 第一级把完整列表载入浏览器，可做全列表排序、评论重排、FileShow 完整浏览
-- 第二级只加载当前页，滚动继续取包，适合几千到几万文件
-- 评论从 `descript.ion` 实时覆盖，修改评论不需要重建列表
-- Fixed-folder-order 作为最高权重排序，第一级使用独立第二列表，第二级按已加载页处理
-- Hide-file 规则在建立冻结列表时应用，规则变化会自动重建
-- HFS 原生搜索 UI 保留；第一级用 HFS 原生搜索，第二级从冻结包搜索
-- 页面右上角显示冻结信息（一行，宽屏与目录按钮共用底部）
-- 原生统计标签在冻结模式中隐藏，避免与插件信息重复
+Current plugin version: **3.5**  
+Storage layout version: **2.6**  
+Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
 ---
 
-## 安装
+## Features
 
-1. 把整个 `List-cache` 文件夹放到 HFS 的插件目录，例如：
+- Automatically freezes folders above the configured threshold
+- Splits the frozen listing into pages for fast first-page loading
+- Three tiers: no freeze for small folders, a complete local list for the first tier, lazy paging for the second tier
+- First tier loads the complete listing into the browser for full-list sorting, comment reordering, and full FileShow navigation
+- Second tier loads only the current page and continues lazily while scrolling
+- Comments are overlaid from `descript.ion` on every read, so comment edits do not require a rebuild
+- Fixed-folder-order is the highest-priority sort; the first tier uses a separate second list, while the second tier applies it to the loaded page
+- Hide-file rules are applied when the frozen listing is created; a rule change triggers a rebuild
+- HFS native search UI is preserved; the first tier uses native HFS search, the second tier searches the frozen packets
+- A one-line status appears at the bottom of the header; on wide screens it shares the bottom row with the breadcrumb buttons
+- The native folder-statistics label is hidden in frozen mode to avoid duplicate counts
+
+---
+
+## Installation
+
+1. Copy the entire `List-cache` folder into the HFS plugin directory, for example:
 
    ```text
    HFS3/plugins/List-cache/
    ```
 
-2. 在 HFS 的插件/Options 界面启用 **List-cache**。
-3. 刷新页面。
+2. Enable **List-cache** in the HFS plugins/Options UI.
+3. Reload the page.
 
-插件没有额外的总开关：**在 HFS 插件列表中启用即生效**。
+There is no separate master switch inside the plugin. **Enabling the plugin in HFS is enough.**
 
-首次访问超过阈值的文件夹时，HFS 会正常生成一次列表，插件在旁边建立冻结副本；这次访问仍可能较慢。建立完成后，下一次访问开始使用冻结列表。
+The first visit to a folder above the threshold still lets HFS produce the listing; the plugin builds the frozen copy alongside it, so that visit can be slow. Later visits use the frozen listing.
 
-> 页面大小取自 HFS 的 `config.yaml` 的 `page_size`，不是插件面板里的独立选项。修改 `page_size` 后需要重启 HFS，旧冻结库会被整体清空并按新页大小重建。
+> The page size comes from `page_size` in HFS `config.yaml`, not from a plugin-specific option. After changing `page_size`, restart HFS. The frozen database is cleared and rebuilt with the new page size.
 
 ---
 
-## 三档行为
+## Three tiers
 
-| 文件夹条目数 | 行为 |
+| Folder entry count | Behavior |
 |---|---|
-| `<= minEntries`（默认 200） | 不冻结，完全走 HFS 原生列表 |
-| `201 – localSortUpTo`（默认 5,000） | **第一级**：建立一份完整冻结库；浏览器一次载入完整列表，本地排序、本地分页 |
-| `localSortUpTo + 1 – largeFoldersOver`（默认 5,001 – 10,000） | **第二级**：懒加载；只取当前页，滚动继续取包；使用普通有效期（默认 31 天） |
-| `> largeFoldersOver`（默认 10,000） | 第二级懒加载，使用长有效期（默认 365 天） |
+| `<= minEntries` (default 200) | Not frozen; HFS native listing |
+| `201 - localSortUpTo` (default 5,000) | **First tier**: one complete frozen listing; the browser loads the whole list once, then sorts and pages locally |
+| `localSortUpTo + 1 - largeFoldersOver` (default 5,001 - 10,000) | **Second tier**: lazy loading; only the current page is fetched; normal validity (default 31 days) |
+| `> largeFoldersOver` (default 10,000) | Second tier lazy loading with the long validity period (default 365 days) |
 
-阈值比较是严格的“大于”：
+Thresholds are strict "greater than" comparisons:
 
-- 200 条：不冻结
-- 201 条：开始冻结
-- 5,000 条：第一级
-- 5,001 条：第二级
-- 10,000 条：普通有效期
-- 10,001 条：长有效期
+- 200 entries: not frozen
+- 201 entries: freezing starts
+- 5,000 entries: first tier
+- 5,001 entries: second tier
+- 10,000 entries: normal validity
+- 10,001 entries: long validity
 
-如果 `localSortUpTo` 小于 `minEntries`，实际第一级上限会提升到 `minEntries`。
+If `localSortUpTo` is lower than `minEntries`, the effective first-tier ceiling is raised to `minEntries`.
 
 ---
 
-## 第一级：完整列表在浏览器里
+## First tier: the complete listing in the browser
 
-适用：201 – 5,000 条（默认）。
+Applies to 201 - 5,000 entries by default.
 
-1. 打开文件夹时，后端返回一份完整冻结列表。
-2. 浏览器保存完整列表，并把它作为本地排序的主数据。
-3. 页面仍然只渲染当前页（默认 50 条），不会一次生成几千个 DOM 节点。
-4. 使用插件自己的分页条，不依赖 HFS 原生 pager。
-5. 排序、翻页、评论重排都在浏览器里完成。
+1. Opening the folder returns one complete frozen listing from the backend.
+2. The browser keeps the complete list as the local sorting source.
+3. Only the current page is rendered (50 entries by default); thousands of DOM nodes are not created at once.
+4. The plugin uses its own pager instead of the HFS native pager.
+5. Sorting, paging, and comment reordering all happen in the browser.
 
-### 排序
+### Sorting
 
-第一级支持 HFS 的完整排序状态：
+The first tier supports the full HFS sort state:
 
 - `name`
 - `extension`
@@ -94,32 +94,32 @@ List-cache 是给 [HFS](https://github.com/rejetto/hfs) 使用的列表缓存插
 - `folders_first`
 - `sort_numerics`
 
-排序会作用于**完整本地列表**，不是当前页。
+Sorting applies to the complete local list, not just the current page.
 
-### Fixed-folder-order 第二列表
+### Fixed-folder-order second list
 
-Fixed-folder-order 在第一级不是每次都临时比较，而是建立一份**独立的第二列表**：
+Fixed-folder-order does not run an ad-hoc comparison on every page. The first tier builds a separate second list:
 
-1. 先得到当前 HFS 排序下的原生顺序（base）。
-2. 用 Fixed 的 `sortCompare` 做最高权重排序。
-3. Fixed 认为相等的项目，保留 base 中的原始顺序，而不是重新按名称排序。
+1. Start from the native order under the current HFS sort settings (the base).
+2. Apply Fixed's `sortCompare` as the highest-priority sort.
+3. When Fixed considers two entries equal, keep their original base order instead of re-sorting them by name.
 
-因此：
+As a result:
 
-- 有 comment tag 的文件会被强制提前，顺序遵循 Fixed 的 `commentOrder`（例如 `top` → `3` → `2` → `1`）。
-- 没有 tag 的文件保持原来的本地列表顺序。
-- Fixed 的 comment tag、文件模式、文件夹模式都仍然是最高权重。
-- Fixed 被关闭时，直接使用原生排序列表。
+- Files with comment tags move to their Fixed positions, following the configured `commentOrder` (for example `top` -> `3` -> `2` -> `1`).
+- Untagged files keep the existing local list order.
+- Fixed comment tags, file patterns, and folder patterns remain the highest priority.
+- When Fixed is disabled, the native sorted list is used directly.
 
-Comment 改变后会清除 Fixed 第二列表并重建；其他排序变化也会重建对应缓存。
+A comment change clears and rebuilds the Fixed second list. Sort changes rebuild the corresponding caches.
 
-### Fixed 插件设置
+### Fixed plugin configuration
 
-要让 comment tag 生效，需要：
+For comment tags to take effect:
 
-1. HFS 启用 **Fixed-folder-order**。
-2. 在其 Options 中开启 **Enable Custom Sorting**。
-3. 配置 `commentOrder`，例如：
+1. Enable **Fixed-folder-order** in HFS.
+2. Enable **Enable Custom Sorting** in its Options dialog.
+3. Configure `commentOrder`, for example:
 
    ```yaml
    top
@@ -128,302 +128,302 @@ Comment 改变后会清除 Fixed 第二列表并重建；其他排序变化也�
    1
    ```
 
-4. `commentOrderEnabled: true`（默认配置）。
+4. Keep `commentOrderEnabled: true` (the default).
 
-List-cache 不复制 Fixed 的配置，只在浏览器里调用 HFS 的 `sortCompare` 事件。
+List-cache does not duplicate Fixed's configuration. It calls the HFS `sortCompare` event in the browser.
 
-### FileShow / 图片浏览
+### FileShow / image browsing
 
-第一级平时 `HFS.state.list` 只有当前页。打开 HFS 的 `.file-show` 对话框时，插件会暂时把完整本地列表放进 `state.list`，让 FileShow 可以左右浏览全部文件；关闭后恢复当前页。
+In the first tier, `HFS.state.list` normally contains only the current page. When the HFS `.file-show` dialog opens, the plugin temporarily places the complete local list into `state.list`, so FileShow can navigate every file. The current page is restored when the dialog closes.
 
-### 头部信息
+### Header status
 
-冻结模式会在 header 底部显示一行：
+Frozen mode shows one line at the bottom of the header:
 
 ```text
 Frozen list mode - local sort | FRO:11-25 / EXP:12-26 | 3,485 items / size: 98.4 MB
 ```
 
-- 宽屏且右侧空间足够时，与目录按钮共用底部同一行。
-- 窄屏或路径很长时自动回到独立一行。
-- 原生 `#folder-stats` 统计标签隐藏，避免出现两个数量模块。
-- `rebuild needed` 会替代 `local sort` 提示。
+- On wide screens, when there is enough room on the right, it shares the bottom row with the breadcrumb buttons.
+- On narrow screens or with a long path, it automatically returns to its own line.
+- The native `#folder-stats` label is hidden to avoid two count modules.
+- `rebuild needed` replaces `local sort` when a rebuild is required.
 
 ---
 
-## 第二级：懒加载
+## Second tier: lazy loading
 
-适用：超过 `localSortUpTo`（默认 5,000）的文件夹。
+Applies to folders above `localSortUpTo` (5,000 by default).
 
-- 打开时只请求第一页。
-- 页面底部使用插件分页条；点击页码只读取对应包。
-- 滚动接近底部自动追加下一页；在顶部向上滚动会补前一页。
-- 排序控件被禁用，列表固定为冻结时的名称/文件夹顺序（由 HFS 配置决定）。
-- Fixed-folder-order 只对**当前已加载的页**应用，不会对全库重排。
-- 搜索请求由后端从冻结包中查找，评论搜索走 HFS 原生搜索。
-- 大文件夹使用更长有效期。
+- Opening the folder requests only the first page.
+- The plugin pager at the bottom loads exactly the clicked packet.
+- Scrolling near the bottom appends the next page; scrolling upward at the top loads the previous page.
+- Sorting controls are disabled. The listing keeps the frozen name/folder order determined by the HFS configuration.
+- Fixed-folder-order is applied only to the currently loaded page, never to the whole database.
+- Search requests are answered from the frozen packets; comment search uses native HFS search.
+- Very large folders use the longer validity period.
 
-第二级不会把完整列表载入浏览器，因此 FileShow 只能看到当前已加载窗口。
-
----
-
-## 搜索与筛选
-
-### 搜索
-
-- **第一级**：把请求交给 HFS 原生搜索，直接在当前文件夹/磁盘上搜索。
-- **第二级**：HFS 搜索请求由 List-cache 从冻结包中返回匹配项，分页也由冻结数据提供。
-- **评论搜索**：始终走 HFS 原生搜索，因为评论可能在冻结后被修改。
-- 搜索对话框可以显式选择 HFS 原生递归搜索（`lcNative`）。
-
-### 筛选
-
-- **第二级**：打开 HFS 原生筛选时，插件会加载完整冻结列表，再交给 HFS 原生过滤/分页。
-- **第一级**：列表由插件分页器管理，HFS 原生筛选只作用于当前页；第一级暂未另做完整本地筛选。
+The second tier does not load the complete list into the browser, so FileShow can only navigate the currently loaded window.
 
 ---
 
-## 评论
+## Search and filtering
 
-评论来自文件夹中的 `descript.ion`。
+### Search
 
-- 每次返回页面、完整列表或搜索结果时，插件都会读取当前 `descript.ion` 并覆盖评论字段。
-- 因此修改评论**不需要重建冻结库**。
-- 通过 HFS 界面修改评论时，当前列表会同步更新；第一级的 Fixed 第二列表也会失效并重建。
-- 直接编辑 `descript.ion` 后，需要刷新页面（或重新访问文件夹）。
-- 评论搜索始终使用 HFS 原生搜索。
+- **First tier**: requests go to native HFS search, which searches the current folder/disk directly.
+- **Second tier**: HFS search requests are answered by List-cache from the frozen packets, including paging.
+- **Comment search**: always uses native HFS search, because comments may change after the freeze.
+- The search dialog can explicitly request HFS native recursive search (`lcNative`).
+
+### Filtering
+
+- **Second tier**: opening the HFS native filter loads the complete frozen list and hands it to HFS for native filtering and paging.
+- **First tier**: the list is managed by the plugin pager, so the HFS native filter only applies to the current page. Full local filtering for the first tier is not implemented yet.
+
+---
+
+## Comments
+
+Comments come from `descript.ion` in the folder.
+
+- Every page, complete listing, and search response overlays the current `descript.ion` comments.
+- Editing a comment therefore does not require rebuilding the frozen listing.
+- Comments changed through the HFS UI update the current list; the first-tier Fixed second list is invalidated and rebuilt.
+- After editing `descript.ion` directly, reload the page or revisit the folder.
+- Comment search always uses native HFS search.
 
 ---
 
 ## Hide-file
 
-Hide-file 是前端插件；如果冻结列表绕过它，被隐藏的文件会重新出现。List-cache 的处理方式是：
+Hide-file is a frontend plugin. If a frozen listing bypassed it, hidden files would reappear. List-cache handles this as follows:
 
-- 建立冻结库时应用 Hide-file 规则。
-- 计算规则的签名并写入 `meta.json`。
-- 之后每次访问比较签名；规则变化时把冻结库视为过期并重建。
-- 隐藏规则、启用列表等变化都会触发签名变化。
+- Hide-file rules are applied while the frozen listing is created.
+- A signature of the rules is stored in `meta.json`.
+- The signature is compared on later visits; when the rules change, the frozen listing is treated as stale and rebuilt.
+- Changes to hide rules or the enabled plugin list change the signature.
 
 ---
 
-## 设置项
+## Settings
 
-| 设置 | 默认值 | 说明 |
+| Setting | Default | Description |
 |---|---:|---|
-| Freeze folders with more entries than | 200 | 超过此数量才冻结 |
-| Load complete listing in the browser up to | 5000 | 第一级上限；超过则懒加载 |
-| Valid for | 31 天 | 普通文件夹冻结列表有效期 |
-| Very large folders over | 10000 | 超过后使用长有效期 |
-| Valid for very large folders | 365 天 | 超大文件夹有效期 |
-| Regenerate before | 空 | 早于该时间的列表在下次访问时重建；可选 |
-| Debug log | 关闭 | 输出调试日志到插件日志和 `storage/debug.log` |
+| Freeze folders with more entries than | 200 | Freeze only folders above this count |
+| Load complete listing in the browser up to | 5000 | First-tier ceiling; larger folders use lazy loading |
+| Valid for | 31 days | Validity of a normal frozen listing |
+| Very large folders over | 10000 | Folders above this use the long validity period |
+| Valid for very large folders | 365 days | Validity for very large folders |
+| Regenerate before | empty | Listings older than this date are rebuilt on the next visit; optional |
+| Debug log | off | Writes debug output to the plugin log and `storage/debug.log` |
 
-### 页面大小
+### Page size
 
-页面大小不在插件面板中设置，而是读取 HFS `config.yaml` 的 `page_size`。
+The page size is not configured in the plugin panel. It is read from `page_size` in HFS `config.yaml`.
 
-- 插件启动时读取当前 `page_size`。
-- `settings.json` 保存建库时使用的页大小。
-- 页大小改变后，插件会清空整个冻结库，避免不同页大小的包混用。
-- 修改后重启 HFS 生效。
-
----
-
-## 重建与有效期
-
-冻结列表会在以下情况视为过期：
-
-1. 超过有效期（普通 31 天，超大 365 天）
-2. 超过 `regenerateBefore` 指定的时间
-3. 文件夹条目数已经不大于 `minEntries`（阈值上调后的旧库）
-4. Hide-file 规则签名变化
-5. 存储布局版本变化（`VERSION_TAG`）
-6. HFS `page_size` 变化（启动时整体清库）
-
-过期的列表在下次访问时重建。重建期间，已经启动构建的后续请求仍可读取旧副本；构建完成后切换到新副本。
-
-> 调整 `minEntries` 后，旧的小目录冻结库不会继续作为冻结库使用；下一次访问会走 HFS 原生列表并清理旧记录。
+- The plugin reads the current `page_size` at startup.
+- `settings.json` records the page size used to build the database.
+- If the page size changes, the plugin clears the entire frozen database to avoid mixing packets with different page sizes.
+- Restart HFS after changing it.
 
 ---
 
-## 存储结构
+## Rebuild and validity
 
-所有数据位于插件 storage 目录：
+A frozen listing is considered stale when:
+
+1. Its validity period has expired (31 days normally, 365 days for very large folders).
+2. It is older than `regenerateBefore`.
+3. The folder entry count is no longer greater than `minEntries` (old database after the threshold was raised).
+4. The Hide-file signature changed.
+5. The storage layout version (`VERSION_TAG`) changed.
+6. The HFS `page_size` changed (the whole database is cleared at startup).
+
+A stale listing is rebuilt on the next visit. During a rebuild, requests that arrive after the build has started can still read the previous copy. The new copy is used when the build completes.
+
+> After raising `minEntries`, old frozen databases for small folders are no longer used. The next visit goes through the HFS native listing and removes the old record.
+
+---
+
+## Storage layout
+
+All data is inside the plugin storage directory:
 
 ```text
 storage/
-  settings.json                 建库时使用的 pageSize
+  settings.json                 pageSize used for the database
   folders.json                  uri -> { dir, count, updatedAt }
-  version.json                  存储布局版本
-  debug.log                     仅在 debug 开启时出现
+  version.json                  storage layout version
+  debug.log                     created only when debug is enabled
   lists/
     <slug>-<hash>/
       <gen>/
         meta.json               format, uri, count, pageSize, updatedAt, gen, chunks, accounts
-        c0000.json              一页，格式为 [["+", entry], ...]
+        c0000.json              one page, format: [["+", entry], ...]
         c0001.json
         ...
 ```
 
-条目字段：
+Entry fields:
 
-- `n`：名称；文件夹名以 `/` 结尾
-- `c`：creation ISO 时间
-- `m`：modified ISO 时间
-- `s`：大小
-- 评论可能在建库时写入包中，但每次读取都会用当前 `descript.ion` 覆盖；因此评论修改不需要重建
+- `n`: name; folder names end with `/`
+- `c`: creation time in ISO format
+- `m`: modification time in ISO format
+- `s`: size
+- Comments may be written into a packet at build time, but every read overlays the current `descript.ion`; comment edits therefore do not require a rebuild
 
-### 版本号规则
+### Version rules
 
-- `exports.version` 是插件信息版本，**不会**清空冻结库。
-- `VERSION_TAG` 是存储布局版本，只有 meta/chunks 格式变化时才应该修改；修改会清空所有冻结库。
-- 不要为了 CSS、排序、头部显示等前端改动提升 `VERSION_TAG`。
-
----
-
-## 权限与安全
-
-- 冻结列表只是 HFS 已经生成的列表的缓存；**谁可以打开文件夹仍由 HFS 决定**。
-- `meta.json` 记录已经由 HFS 服务过该文件夹的账号。
-- 只有记录过的账号才能读取该冻结列表；其他账号仍走 HFS 原流程，并在 HFS 返回后记录。
-- 根目录 `/` 不冻结。
-- Hide-file 在建立列表时应用，避免缓存绕过隐藏规则。
-- 评论覆盖读取源目录，遵循 HFS 的目录访问范围。
-- 插件不改变 HFS 的认证、权限或密码逻辑。
+- `exports.version` is the plugin information version and **never** clears the frozen database.
+- `VERSION_TAG` is the storage layout version. It should change only when the meta/chunk format changes; changing it clears all frozen databases.
+- Do not raise `VERSION_TAG` for CSS, sorting, header, or other frontend-only changes.
 
 ---
 
-## 内部接口
+## Permissions and security
 
-供前端和调试使用，HFS 会加上下划线前缀：
+- A frozen listing is only a cache of a listing HFS has already produced. **HFS still decides who may open the folder.**
+- `meta.json` records the accounts that HFS has already served that folder to.
+- Only recorded accounts can read the frozen listing. Other accounts still go through the normal HFS flow and are recorded after HFS responds.
+- The root folder `/` is never frozen.
+- Hide-file is applied when the listing is created so the cache cannot bypass hidden-file rules.
+- Comment overlays read the source directory within the HFS directory scope.
+- The plugin does not change HFS authentication, permissions, or password logic.
 
-| 名称 | 用途 |
+---
+
+## Internal endpoints
+
+Used by the frontend and for debugging. HFS adds an underscore prefix:
+
+| Name | Purpose |
 |---|---|
-| `lc_meta` | 查询文件夹是否冻结、条目数、页大小、有效期、是否第一级 |
-| `lc_page` | 按页读取冻结包 |
-| `lc_all` | 读取完整冻结列表（第一级本地排序、筛选） |
-| `lc_comment` | 读取/刷新评论信息 |
+| `lc_meta` | Returns frozen status, entry count, page size, validity, and first-tier flag |
+| `lc_page` | Reads one frozen page |
+| `lc_all` | Reads the complete frozen listing (first-tier local sorting and filtering) |
+| `lc_comment` | Reads/refreshes comment data |
 
-后端还挂接 HFS 的 `get_file_list` 请求，用于拦截普通列表请求。
+The backend also hooks the HFS `get_file_list` request to intercept normal listing requests.
 
 ---
 
-## 文件结构
+## File structure
 
 ```text
 List-cache/
-  plugin.js              后端：捕获、切包、索引、有效期、Hide-file、评论覆盖、API
-  public/main.js         前端：三档入口、第一级本地排序/分页、Fixed 第二列表、FileShow、搜索 UI
-  public/style.css       头部信息、分页条、原生统计隐藏、窄屏适配
-  README.md              本文件
+  plugin.js              Backend: capture, packet writing, index, validity, Hide-file, comments, API
+  public/main.js         Frontend: tier entry, first-tier local sorting/paging, Fixed second list, FileShow, search UI
+  public/style.css       Header status, pager, native statistics hiding, narrow-screen layout
+  README.md              This file
 ```
 
-无构建步骤，修改 `plugin.js` 后由 HFS 热加载；修改 `public/*` 后需要 **Ctrl+F5** 强制刷新浏览器缓存。
+There is no build step. HFS hot-reloads `plugin.js`; after changing `public/*`, press **Ctrl+F5** to bypass the browser cache.
 
 ---
 
-## 常见问题
+## FAQ
 
-### 第一次打开还是很慢
+### The first visit is still slow
 
-第一次访问需要 HFS 扫描并生成冻结副本，慢是正常的。建立完成后再次打开才会使用缓存。
+The first visit lets HFS scan the directory and build the frozen copy. It becomes fast on later visits.
 
-### 文件夹没有冻结
+### A folder is not frozen
 
-- 条目数不超过 `minEntries`（默认 200）
-- 是根目录 `/`
-- 当前账号尚未被 HFS 服务过该文件夹
-- 正在构建中
+- The entry count does not exceed `minEntries` (200 by default).
+- The folder is the root `/`.
+- The current account has not yet been served that folder by HFS.
+- The folder is currently being built.
 
-### 排序控件被禁用
+### Sorting controls are disabled
 
-第二级懒加载模式有意禁用排序，避免只对当前页排序造成错位。要使用完整排序，需要把 `localSortUpTo` 提高到覆盖该文件夹。
+The second-tier lazy mode intentionally disables sorting to avoid sorting only the current page incorrectly. To get full sorting, raise `localSortUpTo` so the folder falls into the first tier.
 
-### Fixed 的顺序没有生效
+### Fixed order does not take effect
 
-检查：
+Check:
 
-1. Fixed-folder-order 是否启用
-2. Options 中的 **Enable Custom Sorting** 是否开启
-3. `commentOrderEnabled` 是否为 true
-4. 文件是否真的有 `descript.ion` 评论
-5. 第二级只对已加载页生效；第一级才使用完整第二列表
+1. Fixed-folder-order is enabled in HFS.
+2. **Enable Custom Sorting** is enabled in its Options dialog.
+3. `commentOrderEnabled` is true.
+4. The files really have `descript.ion` comments.
+5. The second tier applies Fixed only to the loaded page; the first tier uses the complete second list.
 
-### 修改评论后顺序没变
+### The order does not change after editing a comment
 
-- 通过 HFS 界面改评论：当前页会刷新，第一级 Fixed 列表会重建
-- 直接改 `descript.ion`：刷新页面
-- 评论搜索使用 HFS 原生搜索，不走冻结库
+- Comment changed through the HFS UI: the current page refreshes and the first-tier Fixed list is rebuilt.
+- `descript.ion` edited directly: reload the page.
+- Comment search uses native HFS search and does not use the frozen listing.
 
-### 修改了 page_size 后缓存全没了
+### All caches disappeared after changing page_size
 
-这是预期行为：不同页大小的包不能混用，插件启动时会清空冻结库。
+This is expected. Packets built with different page sizes cannot be mixed, so the plugin clears the frozen database at startup.
 
-### 想强制重建全部
+### Force a full rebuild
 
-停止 HFS 后删除：
+Stop HFS, then delete:
 
 ```text
 plugins/List-cache/storage/lists/
 plugins/List-cache/storage/folders.json
 ```
 
-再启动 HFS。`version.json` 和 `settings.json` 可以保留；删除 `version.json` 也会触发清库。
+Start HFS again. `version.json` and `settings.json` may be kept. Deleting `version.json` also triggers a database clear.
 
-### 头部出现两个数量
+### Two entry-count modules appear in the header
 
-原生统计标签已在冻结模式隐藏；如果仍看到，强制刷新 CSS/JS（Ctrl+F5）。
-
----
-
-## 已知限制
-
-- 第一级会把完整列表载入内存，适合到 `localSortUpTo` 为止；默认 5,000。
-- 第一级 HFS 原生筛选只作用于当前页，完整本地筛选尚未实现。
-- 第二级 FileShow 只能浏览已加载窗口。
-- 第二级排序控件禁用，Fixed 只作用于当前页。
-- 评论从 `descript.ion` 读取；外部修改后需要刷新。
-- 超过 3,000,000 条的极端目录会触发捕获安全上限。
+The native statistics label is hidden in frozen mode. If it is still visible, force-refresh CSS/JS with Ctrl+F5.
 
 ---
 
-## 开发说明
+## Known limitations
 
-- 后端入口：`plugin.js` 的 `exports.init(api)`
-- 前端入口：`public/main.js`、`public/style.css`
-- 存储布局常量：`FORMAT`、`VERSION_TAG`
-- 第一级判定：`meta.count <= localSortThreshold()`
-- 第一级本地排序：`public/main.js` 的 `localPureOrder()` 与 `localOrderForCurrentSort()`
-- Fixed 第二列表：`localOrderForCurrentSort()` 内部的稳定覆盖排序
-- 修改后检查语法：
+- The first tier keeps the complete listing in memory up to `localSortUpTo` (5,000 by default).
+- The first-tier HFS native filter applies only to the current page; full local filtering is not implemented yet.
+- In the second tier, FileShow can navigate only the loaded window.
+- The second tier disables sorting controls and applies Fixed only to the current page.
+- Comments are read from `descript.ion`; external edits require a page reload.
+- Extremely large directories above 3,000,000 entries hit the capture safety limit.
+
+---
+
+## Development notes
+
+- Backend entry point: `exports.init(api)` in `plugin.js`
+- Frontend entry points: `public/main.js`, `public/style.css`
+- Storage layout constants: `FORMAT`, `VERSION_TAG`
+- First-tier test: `meta.count <= localSortThreshold()`
+- First-tier local sorting: `localPureOrder()` and `localOrderForCurrentSort()` in `public/main.js`
+- Fixed second list: the stable overlay sort inside `localOrderForCurrentSort()`
+- Syntax check after changes:
 
   ```bash
   node --check plugin.js
   node --check public/main.js
   ```
 
-- 不要为纯前端改动提升 `VERSION_TAG`，否则所有冻结库会被清空并重建。
+- Do not raise `VERSION_TAG` for frontend-only changes; doing so clears and rebuilds every frozen database.
 
 ---
 
-## 版本记录
+## Version history
 
 ### 3.5
 
-- 三档分界：200 / 5,000 / 10,000
-- 第一级完整列表本地排序、本地分页
-- Fixed-folder-order 独立第二列表，Fixed 最高权重，原生顺序作 tie-breaker
-- FileShow 在第一级临时取得完整列表
-- 头部信息改为单行，宽屏与目录按钮共用底部
-- 原生统计标签隐藏
-- 移除插件内部总开关，HFS 启用插件即生效
+- Three tier boundaries: 200 / 5,000 / 10,000
+- First tier: complete local list sorting and local paging
+- Fixed-folder-order separate second list: Fixed highest priority, native order as tie-breaker
+- FileShow receives the complete list in the first tier
+- Header status is a single line and shares the bottom row with breadcrumb buttons on wide screens
+- Native folder statistics hidden
+- Internal master switch removed; enabling the plugin in HFS is enough
 
-存储布局：`VERSION_TAG = 2.6`，本次前端改动不清库。
+Storage layout: `VERSION_TAG = 2.6`. These frontend changes do not clear the database.
 
 ---
 
-## 相关项目
+## Related projects
 
-- HFS：<https://github.com/rejetto/hfs>
-- 本插件仓库：<https://github.com/hugo529100/hfs-List-cache>
-- 配套插件：Fixed-folder-order、Hide-file、Tree-nav、Musicplayer+
+- HFS: <https://github.com/rejetto/hfs>
+- This plugin: <https://github.com/hugo529100/hfs-List-cache>
+- Companion plugins: Fixed-folder-order, Hide-file, Tree-nav, Musicplayer+
