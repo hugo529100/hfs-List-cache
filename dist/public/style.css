@@ -167,16 +167,39 @@ body.lc-frozen.lc-filtering #lc-paging {
  * header button height, right aligned, first line top and last line bottom aligned.
  * --lc-header-btn-h is set from the real header button height.
  */
+body.lc-frozen header {
+    padding-bottom: 1.15em;
+}
+
 body.lc-frozen #lc-stats {
-    float: right;
+    position: absolute;
+    left: .45em;
+    right: .45em;
+    bottom: 0;
     display: block;
     box-sizing: border-box;
-    height: var(--lc-header-btn-h, 34px);
-    line-height: calc(var(--lc-header-btn-h, 34px) / 3);
-    font-size: calc(var(--lc-header-btn-h, 34px) / 3.8);
-    white-space: pre-line;
+    height: auto;
+    line-height: 1.15;
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     text-align: right;
-    margin: 0 0 0 .5em;
-    padding: 0;
+    margin: 0;
+    padding: 0 0 1px;
     color: var(--text);
+    pointer-events: none;
+    z-index: 2;
+}
+
+body.lc-frozen.lc-header-share header {
+    padding-bottom: .2em;
+}
+
+body.lc-frozen.lc-header-share #lc-stats {
+    left: auto;
+    right: .45em;
+    bottom: .12em;
+    width: auto;
+    max-width: none;
 }

@@ -59,18 +59,19 @@ exports.repo = "hugo529100/hfs-List-cache"
 exports.frontend_js = 'main.js'
 exports.frontend_css = 'style.css'
 exports.config = {
-    enabled: {
-        type: 'boolean',
-        defaultValue: true,
-        label: "Enable",
-        helperText: "Serve frozen listings for folders above the threshold"
-    },
     minEntries: {
         type: 'number',
-        defaultValue: 800,
+        defaultValue: 200,
         min: 1,
         label: "Freeze folders with more entries than",
         helperText: "Only listings longer than this are frozen"
+    },
+    localSortUpTo: {
+        type: 'number',
+        defaultValue: 5000,
+        min: 1,
+        label: "Load complete listing in the browser up to",
+        helperText: "First tier: folders up to this size load their whole frozen list once, then use native sorting and paging"
     },
     rebuildAfterDays: {
         type: 'number',
@@ -132,7 +133,6 @@ exports.init = async api => {
     const SETTINGS_FILE = path.join(storageDir, 'settings.json')
 
     const cfg = key => api.getConfig(key)
-    const enabled = () => cfg('enabled') !== false
     const debugOn = () => cfg('debug') === true
     const log = (...args) => {
         if (!debugOn())
@@ -156,7 +156,8 @@ exports.init = async api => {
         return Number.isFinite(n) && n > 0 ? n : fallback
     }
     // every message goes through the "debug" switch of the plugin settings
-    const threshold = () => Math.max(1, positive(cfg('minEntries'), 800))
+    const threshold = () => Math.max(1, positive(cfg('minEntries'), 200))
+    const localSortThreshold = () => Math.max(threshold(), positive(cfg('localSortUpTo'), 5000))
     const largeThreshold = () => Math.max(1, positive(cfg('largeFoldersOver'), 10000))
     // validity ladder: very large folders keep their frozen copy much longer
     const maxAge = meta => {
@@ -178,6 +179,9 @@ exports.init = async api => {
     function isStale(meta) {
         const ts = Date.parse(meta && meta.updatedAt || '')
         if (!Number.isFinite(ts))
+            return true
+        // the threshold moved above this folder: it should no longer be frozen
+        if (Number(meta.count) <= threshold())
             return true
         // Hide-file rules changed (or the plugin was disabled) -> rebuild the visible set
         if (meta.hideSignature !== hideSignature())
@@ -1120,8 +1124,6 @@ exports.init = async api => {
 
     async function middleware(ctx) {
         try {
-            if (!enabled())
-                return
             if (!ready)
                 return
             if (ctx.path !== API_PATH)
@@ -1152,6 +1154,8 @@ exports.init = async api => {
                 const known = Boolean(meta && meta.accounts && meta.accounts[account])
                 if (!meta || !known)
                     return
+                if (meta.count <= localSortThreshold())
+                    return // first tier: native search over the complete local list/disk
                 if (sse)
                     return serveSearchSse(ctx, uri, rec.dir, meta, account, params)
                 const list = await searchEntries(rec.dir, meta, params).catch(() => null)
@@ -1213,6 +1217,14 @@ exports.init = async api => {
             }
         }
         const updated = Date.parse(meta.updatedAt) || 0
+        if (Number(meta.count) <= threshold()) {
+            const account = userOf(ctx)
+            return {
+                frozen: false,
+                building: building.has(uri + '|' + account),
+                large: false
+            }
+        }
         return {
             frozen: true,
             count: meta.count,
@@ -1222,6 +1234,7 @@ exports.init = async api => {
             updatedAt: meta.updatedAt,
             expires: new Date(updated + maxAge(meta)).toISOString(),
             alphabet: meta.alphabet || {},
+            localSort: meta.count <= localSortThreshold(),
             sort: meta.sort || { invert: false, numeric: false, foldersFirst: true }
         }
     }

@@ -30,6 +30,8 @@
     const NEAR_PX = 600
 
     let info = null
+    let localEntries = null // first tier: complete raw listing, sorted locally
+    let localFileShowOpen = false
     let currentUri = ''
     let forced = { sort_by: 'name', invert_order: false, folders_first: true, sort_numerics: false }
     let pending = null
@@ -110,6 +112,134 @@
     const rows = () => document.querySelectorAll('ul.dir > li')
     const nextFrame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
 
+    const textCollator = new Intl.Collator(undefined, { sensitivity: 'base' })
+    const numericCollator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true })
+
+    function extensionOfName(name) {
+        const base = String(name || '').replace(/\/$/, '')
+        const dot = base.lastIndexOf('.')
+        return dot > 0 ? base.slice(dot + 1).toLowerCase() : ''
+    }
+
+    function dateValue(value) {
+        const t = value instanceof Date ? value.getTime() : Date.parse(value)
+        return Number.isFinite(t) ? t : 0
+    }
+
+    function compareLocal(a, b, mode) {
+        const ao = Number(a && a.order) || 0, bo = Number(b && b.order) || 0
+        if (ao !== bo)
+            return bo - ao
+        if (mode === 'fixed' && typeof HFS.emit === 'function') {
+            const custom = HFS.emit('sortCompare', { a, b }).find(Boolean)
+            if (custom)
+                return custom
+        }
+        const af = a.isFolder === true || (a.n && a.n.endsWith('/'))
+        const bf = b.isFolder === true || (b.n && b.n.endsWith('/'))
+        if (state.folders_first && af !== bf)
+            return af ? -1 : 1
+        const invert = state.invert_order ? -1 : 1
+        let r = 0
+        if (mode !== 'fixed') {
+            const by = state.sort_by
+            if (by === 'size')
+                r = (Number(a.s) || 0) - (Number(b.s) || 0)
+            else if (by === 'extension')
+                r = textCollator.compare(a.ext || extensionOfName(a.n), b.ext || extensionOfName(b.n))
+            else if (by === 'time')
+                r = dateValue(a.m) - dateValue(b.m)
+            else if (by === 'creation')
+                r = dateValue(a.c) - dateValue(b.c)
+        }
+        if (!r && state.sort_numerics)
+            r = numericCollator.compare(a.n, b.n)
+        if (!r)
+            r = textCollator.compare(a.n, b.n)
+        return invert * r
+    }
+
+    function fixedOrderEnabled() {
+        try {
+            const value = localStorage.getItem('hfs_fixed_folder_order_enabled')
+            return value === null || value === 'true'
+        }
+        catch (e) { return true }
+    }
+
+    let localFixedOrder = null
+    let localFixedOrderKey = ''
+    const localPureOrders = new Map()
+
+    function localPureOrder() {
+        const key = [state.sort_by, !!state.invert_order, !!state.folders_first, !!state.sort_numerics].join('|')
+        let list = localPureOrders.get(key)
+        if (!list) {
+            list = [...localEntries].sort((a, b) => compareLocal(a, b, 'pure'))
+            localPureOrders.set(key, list)
+        }
+        return list
+    }
+
+    function localOrderForCurrentSort() {
+        if (!localEntries)
+            return []
+        const base = localPureOrder()
+        if (!fixedOrderEnabled() || typeof HFS.emit !== 'function')
+            return base
+        const key = [state.sort_by, !!state.invert_order, !!state.folders_first, !!state.sort_numerics].join('|')
+        if (!localFixedOrder || localFixedOrderKey !== key) {
+            // Fixed-folder-order has the highest weight; everything it considers equal
+            // keeps the already-loaded native list order as the tie-breaker.
+            const rank = new Map(base.map((entry, index) => [entry, index]))
+            localFixedOrder = [...base].sort((a, b) => {
+                const custom = HFS.emit('sortCompare', { a, b }).find(Boolean)
+                return custom || (rank.get(a) - rank.get(b))
+            })
+            localFixedOrderKey = key
+        }
+        return localFixedOrder
+    }
+
+    function clearLocalOrders() {
+        localFixedOrder = null
+        localFixedOrderKey = ''
+        localPureOrders.clear()
+    }
+
+    let localExpandTimer = 0
+
+    function renderLocalPage(page, scroll) {
+        if (!info || !info.localSort || !localEntries)
+            return
+        const size = Number(info.pageSize) || pageSize()
+        const ordered = localOrderForCurrentSort()
+        info.count = ordered.length
+        info.pages = Math.max(1, Math.ceil(ordered.length / size))
+        const p = Math.max(1, Math.min(info.pages, Math.floor(Number(page)) || 1))
+        activePage = p
+        loadedFirst = loadedLast = p
+        state.list = ordered.slice((p - 1) * size, p * size)
+        try { state.page_size = BIG_PAGE }
+        catch (e) { /* ignore */ }
+        buildPager()
+        mountPager()
+        if (scroll)
+            window.scrollTo({ top: 0 })
+    }
+
+    function scheduleLocalExpand() {
+        if (!info || !info.localSort || !localEntries)
+            return
+        clearLocalOrders()
+        clearTimeout(localExpandTimer)
+        localExpandTimer = setTimeout(() => {
+            renderLocalPage(1)
+            // HFS may sort/trim its own copy once more after its debounced sort
+            setTimeout(() => renderLocalPage(1), 180)
+        }, 120)
+    }
+
     function forceSort() {
         for (const k in forced)
             if (state[k] !== forced[k])
@@ -124,8 +254,12 @@
         // only add the 2-digit year when the validity actually crosses a year boundary
         const crossYear = !isNaN(from.getTime()) && !isNaN(to.getTime())
             && from.getFullYear() !== to.getFullYear()
-        const mode = info.dirty ? 'Frozen list mode - rebuild needed' : 'Frozen list mode'
-        return `${mode}\nFRO:${fmtDate(info.updatedAt, crossYear)} / EXP:${fmtDate(info.expires, crossYear)}\n${fmt(info.count)} items / size: ${fmtSize(info.bytes)}`
+        const mode = info.dirty
+            ? 'Frozen list mode - rebuild needed'
+            : info.localSort
+                ? 'Frozen list mode - local sort'
+                : 'Frozen list mode'
+        return `${mode} | FRO:${fmtDate(info.updatedAt, crossYear)} / EXP:${fmtDate(info.expires, crossYear)} | ${fmt(info.count)} items / size: ${fmtSize(info.bytes)}`
     }
 
     function syncHeaderHeight() {
@@ -137,6 +271,31 @@
                 h = Math.round(r)
         }
         document.body.style.setProperty('--lc-header-btn-h', h + 'px')
+    }
+
+    function syncHeaderShare() {
+        if (!info)
+            return
+        const sticker = document.getElementById('lc-stats')
+        const header = document.querySelector('header')
+        if (!sticker || !header) {
+            document.body.classList.remove('lc-header-share')
+            return
+        }
+        const crumbs = [...header.querySelectorAll('.breadcrumb')]
+        if (!crumbs.length) {
+            document.body.classList.remove('lc-header-share')
+            return
+        }
+        const last = crumbs[crumbs.length - 1].getBoundingClientRect()
+        const hr = header.getBoundingClientRect()
+        const clone = sticker.cloneNode(true)
+        clone.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;width:max-content;max-width:none;'
+        document.body.append(clone)
+        const needed = Math.ceil(clone.getBoundingClientRect().width) + 18
+        clone.remove()
+        const available = Math.floor(hr.right - last.right - 12)
+        document.body.classList.toggle('lc-header-share', available >= needed)
     }
 
     function ensureSticker() {
@@ -158,6 +317,7 @@
         if (node.textContent !== text)
             node.textContent = text
         syncHeaderHeight()
+        requestAnimationFrame(syncHeaderShare)
         return node
     }
 
@@ -310,7 +470,7 @@
     }
 
     function syncFilterMode() {
-        if (!info)
+        if (!info || info.localSort)
             return
         if (filterWanted())
             enterFiltering()
@@ -326,6 +486,16 @@
         prefetched.clear()
         document.body.classList.add('lc-filtering')
         removePager()
+        if (info.localSort) {
+            // first tier: the complete list is already in memory; native filter + paging
+            try { state.page_size = info.pageSize } catch (e) { /* ignore */ }
+            clearLocalOrders()
+            state.list = [...localOrderForCurrentSort()]
+            loadedFirst = 1
+            loadedLast = totalPages()
+            activePage = 1
+            return
+        }
         // native paging over the filtered result, exactly like a normal folder
         try { state.page_size = originalPageSize }
         catch (e) { /* ignore */ }
@@ -347,6 +517,15 @@
         }
         if (!info)
             return
+        if (info.localSort) {
+            clearLocalOrders()
+            try { state.page_size = info.pageSize } catch (e) { /* ignore */ }
+            loadedFirst = loadedLast = 1
+            activePage = 1
+            state.list = [...localOrderForCurrentSort()]
+            window.scrollTo({ top: 0 })
+            return
+        }
         // the filter may have widened the window to the whole listing: go back to one packet
         const keep = pageSize()
         if (currentList().length > keep)
@@ -437,10 +616,14 @@
         for (const entry of list || []) {
             if (!entry || typeof entry.n !== 'string')
                 continue
+            if (entry instanceof HFS.DirEntry) {
+                out.push(entry)
+                continue
+            }
             try { out.push(new HFS.DirEntry(entry.n, entry)) }
             catch (e) { /* skip broken entry */ }
         }
-        return applyOrder ? sortPage(out) : out
+        return applyOrder && !(info && info.localSort) ? sortPage(out) : out
     }
 
     async function fetchPageData(page, uri, my) {
@@ -454,6 +637,19 @@
     }
 
     async function fetchPage(page) {
+        if (info && info.localSort && localEntries) {
+            const size = pageSize()
+            const ordered = localOrderForCurrentSort()
+            const pages = Math.max(1, Math.ceil(ordered.length / size))
+            const p = Math.max(1, Math.min(pages, Math.floor(Number(page)) || 1))
+            return {
+                page: p,
+                pages,
+                pageSize: size,
+                count: ordered.length,
+                entries: ordered.slice((p - 1) * size, p * size)
+            }
+        }
         if (busy)
             return null
         const uri = currentUri
@@ -472,7 +668,7 @@
     // JSON responses and make the next scroll step (especially with touch momentum) start
     // from memory instead of waiting for the request.
     function prefetchPage(page) {
-        if (!info || filtering || page < 1 || page > totalPages())
+        if (!info || info.localSort || filtering || page < 1 || page > totalPages())
             return
         if (page >= loadedFirst && page <= loadedLast)
             return
@@ -516,7 +712,7 @@
     function scheduleFill() {
         clearTimeout(fillTimer)
         fillTimer = setTimeout(() => {
-            if (!info || filtering || busy)
+            if (!info || info.localSort || filtering || busy)
                 return
             if (loadedLast < totalPages() && nearBottom())
                 loadNextPage()
@@ -715,7 +911,10 @@
     }, { passive: true })
 
     window.addEventListener('resize', () => {
-        if (!info || filtering)
+        if (!info)
+            return
+        requestAnimationFrame(syncHeaderShare)
+        if (filtering)
             return
         requestAnimationFrame(focusPagerButton)
     }, { passive: true })
@@ -728,6 +927,9 @@
         removePager()
         removeSticker()
         info = null
+        localEntries = null
+        localFileShowOpen = false
+        clearLocalOrders()
         currentUri = ''
         pending = null
         activePage = 1
@@ -742,7 +944,9 @@
             catch (e) { /* ignore */ }
         }
         document.body.classList.remove('lc-frozen')
+        document.body.classList.remove('lc-localsort')
         document.body.classList.remove('lc-filtering')
+        document.body.classList.remove('lc-header-share')
         if (originalPageSize !== undefined && state.page_size !== originalPageSize) {
             try { state.page_size = originalPageSize }
             catch (e) { /* ignore */ }
@@ -767,7 +971,43 @@
         return true
     }
 
+    async function activateLocalSort(p) {
+        if (p.my !== seq)
+            return
+        info = p.info
+        info.dirty = readFrozenDirty(p.uri, p.info.updatedAt)
+        currentUri = p.uri
+        activePage = 1
+        loadedFirst = loadedLast = 0
+        document.body.classList.add('lc-frozen')
+        document.body.classList.remove('lc-localsort')
+        document.body.classList.remove('lc-filtering')
+        removePager()
+        ensureSticker()
+        let res = null
+        try { res = await HFS.customRestCall('lc_all', { uri: p.uri }) }
+        catch (e) { /* offline */ }
+        if (p.my !== seq || !info)
+            return
+        if (!res || res.error || !Array.isArray(res.entries)) {
+            notify('Could not read the frozen list for local sorting')
+            return
+        }
+        localEntries = toEntries(res.entries, false)
+        clearLocalOrders()
+        info.count = localEntries.length
+        info.bytes = Number(res.bytes) || info.bytes
+        info.pageSize = Number(info.pageSize) || pageSize()
+        renderLocalPage(1)
+        ensureSticker()
+        scheduleRefresh()
+        syncFilterMode()
+        syncLocalFileShow()
+    }
+
     async function activate(p) {
+        if (p.info.localSort)
+            return activateLocalSort(p)
         info = p.info
         info.dirty = readFrozenDirty(p.uri, p.info.updatedAt)
         currentUri = p.uri
@@ -856,7 +1096,7 @@
                 maybeHintFirstBuild(res, uri, my)
                 return
             }
-            if (!(Number(res.pages) > 1))
+            if (!res.localSort && !(Number(res.pages) > 1))
                 return
             pending = { uri, info: res, my }
             maybeActivate()
@@ -909,7 +1149,14 @@
 
     for (const k in forced)
         HFS.watchState(k, () => {
-            if (!info || state[k] === forced[k])
+            if (!info)
+                return
+            if (info.localSort) {
+                if (!filtering)
+                    scheduleLocalExpand()
+                return
+            }
+            if (state[k] === forced[k])
                 return
             state[k] = forced[k]
             notify('Sorting is disabled in frozen listings')
@@ -918,7 +1165,7 @@
     // the sort controls stay visible but are fully blocked, with an explanation
     const SORT_CONTROLS = '#option-sort-by, #option-invert-order, #option-folders-first, #option-sort-numerics'
     function blockSort(ev) {
-        if (!info)
+        if (!info || info.localSort)
             return
         const target = ev.target
         if (!target || !target.closest || !target.closest(SORT_CONTROLS))
@@ -1062,7 +1309,20 @@
         }
         if (found) {
             prefetched.clear() // neighboring pages may hold the old comment
-            if (filtering)
+            if (info.localSort) {
+                const target = (localEntries || []).find(e => e && found && e.uri === found.uri)
+                if (target) {
+                    if (found.comment)
+                        target.comment = found.comment
+                    else
+                        delete target.comment
+                }
+                if (filtering)
+                    state.list = [...currentList()]
+                else
+                    scheduleLocalExpand()
+            }
+            else if (filtering)
                 state.list = [...currentList()]
             else
                 resortPageContaining(found)
@@ -1215,9 +1475,31 @@
             ensureSticker()
             enhanceSearchDialog()
             syncHeaderHeight()
+            syncHeaderShare()
             if (!filtering)
                 mountPager()
         }, 80)
     }
     new MutationObserver(scheduleRefresh).observe(document.body, { childList: true, subtree: true })
+
+    function syncLocalFileShow() {
+        if (!info || !info.localSort || !localEntries) {
+            localFileShowOpen = false
+            return
+        }
+        const open = !!document.querySelector('.file-show')
+        if (open === localFileShowOpen)
+            return
+        localFileShowOpen = open
+        if (open) {
+            // FileShow navigates HFS.state.list; hand it the complete local list temporarily
+            try { state.page_size = Number(info.pageSize) || pageSize() }
+            catch (e) { /* ignore */ }
+            state.list = [...localOrderForCurrentSort()]
+        }
+        else {
+            renderLocalPage(activePage)
+        }
+    }
+    new MutationObserver(syncLocalFileShow).observe(document.body, { childList: true, subtree: true })
 })()
