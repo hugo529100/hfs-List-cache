@@ -8,7 +8,7 @@ Typical use cases:
 - Folders where directory scanning makes the first page slow
 - Keeping HFS-native sorting, comments, Fixed-folder-order, and Hide-file behavior on a frozen listing
 
-Current plugin version: **5.4**  
+Current plugin version: **5.6**  
 Storage layout version: **2.6**  
 Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
@@ -408,6 +408,23 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 ---
 
 ## Version history
+
+### 5.6
+
+- A dirty marker older than the current frozen `updatedAt` is now treated as stale and removed automatically
+- Prevents a rebuild prompt from surviving a plugin restart or an already-completed rebuild
+- Markers newer than the frozen copy still show the per-folder prompt
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 5.5
+
+- Fixed re-entering a folder that had just finished its first build: the page-session meta cache no longer pins `{frozen:false}`
+- `onUri` always discards the cached meta for the folder being entered
+- A plain HFS Reload now clears the meta cache and re-checks the folder, so it can recover without a full page refresh
+- If the folder is already active, Reload triggers the complete-list assertion instead of resetting the player
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
 
 ### 5.4
 
