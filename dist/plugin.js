@@ -1,4 +1,4 @@
-// List-cache 5.6
+// List-cache 5.7
 // Keeps a frozen copy of the listing of very big folders in the plugin storage, and
 // serves it page by page ("lazy"): opening the folder only loads the first page.
 // The page bar loads exactly the clicked packet; scrolling near the bottom appends the
@@ -52,7 +52,7 @@
 // packets are written and counted; meta.json is written last. A partial build is never
 // referenced.
 
-exports.version = 5.6
+exports.version = 5.7
 exports.description = "Freezes listings of very big folders and serves them page by page, lazily. The first visit starts building the frozen list; the next visit opens instantly."
 exports.apiRequired = 12.3
 exports.repo = "hugo529100/hfs-List-cache"
@@ -73,12 +73,6 @@ exports.config = {
         unit: "days",
         label: "Valid for",
         helperText: "A frozen listing older than this is built again on the next visit"
-    },
-    regenerateBefore: {
-        type: 'date_time',
-        label: "Regenerate before",
-        helperText: "Listings older than this date are built again",
-        xs: 6
     },
     debug: {
         type: 'boolean',
@@ -159,12 +153,6 @@ exports.init = async api => {
         // Hide-file rules changed (or the plugin was disabled) -> rebuild the visible set
         if (meta.hideSignature !== hideSignature())
             return true
-        const cutoff = cfg('regenerateBefore')
-        if (cutoff) {
-            const cutoffMs = new Date(cutoff).getTime()
-            if (Number.isFinite(cutoffMs) && cutoffMs <= Date.now() && ts < cutoffMs)
-                return true
-        }
         return Date.now() - ts > maxAge(meta)
     }
 
@@ -333,8 +321,26 @@ exports.init = async api => {
         }, null, 2))
     }
 
+    async function reconcileIndex() {
+        let removed = 0
+        for (const [uri, rec] of Object.entries(index.folders)) {
+            try {
+                await fsp.stat(path.join(rec.dir, 'meta.json'))
+            }
+            catch {
+                delete index.folders[uri]
+                removed++
+            }
+        }
+        if (removed) {
+            await saveIndex()
+            log('removed', removed, 'index entries whose frozen copy was missing')
+        }
+    }
+
     await enforceVersion()
     await enforcePageSize()
+    await reconcileIndex()
     ready = true
 
     async function readMeta(dir) {
@@ -841,10 +847,10 @@ exports.init = async api => {
         }
         const rec = index.folders[uri]
         if (clean.length <= threshold()) {
-            if (rec) {
-                dbg('listing shrank, dropping', uri, clean.length)
-                await dropFolder(uri)
-            }
+            // Do not delete the existing frozen copy just because one capture
+            // looked small (permissions, a search page, or a transient error).
+            if (rec)
+                dbg('listing shrank, keeping existing copy', uri, clean.length)
             return
         }
         const prefs = sortPrefs()
@@ -909,19 +915,6 @@ exports.init = async api => {
         await clearDirty(uri)
         log('frozen', uri, clean.length, 'in', chunks.length, 'pages ->', dir)
         api.setTimeout(() => cleanupOldGens(dir).catch(() => {}), 60_000)
-    }
-
-    async function dropFolder(uri) {
-        const rec = index.folders[uri]
-        if (!rec)
-            return
-        delete index.folders[uri]
-        await saveIndex()
-        metaCache.delete(rec.dir)
-        try { await fsp.rm(rec.dir, { recursive: true, force: true }) }
-        catch { /* already gone */ }
-        await clearInvalid(uri)
-        await clearDirty(uri)
     }
 
     function pageSize() {
@@ -1215,6 +1208,10 @@ exports.init = async api => {
         const rec = index.folders[uri]
         const meta = rec && await readMeta(rec.dir)
         if (!meta) {
+            if (rec) {
+                delete index.folders[uri]
+                saveIndex().catch(() => {})
+            }
             const account = userOf(ctx)
             const key = uri + '|' + account
             const progress = captureProgress.get(key)
