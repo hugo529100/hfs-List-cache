@@ -384,7 +384,7 @@
         if (!window.HFS || typeof HFS.onEvent !== 'function')
             return
         HFS.onEvent('fileMenu', ({ entry, menu }) => {
-            if (!info || !info.dirty || !entry || !entry.isFolder || !Array.isArray(menu))
+            if (!info || !entry || !entry.isFolder || !Array.isArray(menu))
                 return
             if (menu.some(item => item && item.id === 'lc-rebuild'))
                 return
