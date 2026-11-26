@@ -1356,6 +1356,9 @@
         if (!uri.endsWith('/'))
             return
         const my = ++seq
+        // A folder that was building during this page session must be checked
+        // again on re-entry; a cached {frozen:false} would keep it native forever.
+        lcMetaCache.delete(sessionKey(uri))
         HFS.customRestCall('lc_meta', { uri }).then(res => {
             if (my !== seq)
                 return
@@ -1390,7 +1393,9 @@
                 if (lcMetaCache.has(key))
                     return Promise.resolve(lcMetaCache.get(key))
                 return nativeCustomRest(name, params, ...rest).then(res => {
-                    if (res && !res.error)
+                    // Never pin a pre-build {frozen:false} response for the page
+                    // session; re-entering the folder must see the finished copy.
+                    if (res && !res.error && res.frozen)
                         lcMetaCache.set(key, res)
                     return res
                 })
@@ -1408,6 +1413,28 @@
             return nativeCustomRest(name, params, ...rest)
         }
         HFS.__lcSessionAll = true
+    }
+
+    // A plain HFS Reload should also recover a folder whose first visit was still
+    // building. Clear the stale meta cache and re-check; don't disturb an active
+    // frozen folder (that case is handled by the list assertions).
+    if (typeof HFS.reloadList === 'function' && !HFS.__lcReloadWrapped) {
+        const nativeReloadList = HFS.reloadList.bind(HFS)
+        HFS.reloadList = function (...args) {
+            const uri = location.pathname
+            lcMetaCache.delete(sessionKey(uri))
+            const result = nativeReloadList(...args)
+            setTimeout(() => {
+                if (location.pathname !== uri)
+                    return
+                if (!info)
+                    onUri(uri)
+                else
+                    scheduleFullAssert(uri, 6)
+            }, 300)
+            return result
+        }
+        HFS.__lcReloadWrapped = true
     }
 
     HFS.watchState('uri', onUri, true)
@@ -1922,7 +1949,9 @@
                 if (lcMetaCache.has(key))
                     return Promise.resolve(lcMetaCache.get(key))
                 return nativeCustomRest(name, params, ...rest).then(res => {
-                    if (res && !res.error)
+                    // Never pin a pre-build {frozen:false} response for the page
+                    // session; re-entering the folder must see the finished copy.
+                    if (res && !res.error && res.frozen)
                         lcMetaCache.set(key, res)
                     return res
                 })
