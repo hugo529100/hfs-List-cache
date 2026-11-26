@@ -8,7 +8,7 @@ Typical use cases:
 - Folders where directory scanning makes the first page slow
 - Keeping HFS-native sorting, comments, Fixed-folder-order, and Hide-file behavior on a frozen listing
 
-Current plugin version: **5.2**  
+Current plugin version: **5.4**  
 Storage layout version: **2.6**  
 Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
@@ -158,7 +158,7 @@ Frozen list mode | FRO:11-25 / EXP:12-26 | 3,485 items / size: 98.4 MB
 - On narrow screens or with a long path, it automatically returns to its own line.
 - The native `#folder-stats` label is hidden to avoid two count modules.
 - When a change is detected, the line changes to `Changes detected - Folder menu > Rebuild Frolist or double click` and breathes through a JavaScript opacity animation. The dirty marker is stored server-side, so every browser sees it.
-- The current folder's breadcrumb menu gets a **Rebuild Frolist** item directly above **Reload**. Double-clicking (or double-tapping) the status line remains a shortcut.
+- The current folder's breadcrumb menu always gets a **Rebuild Frolist** item directly above **Reload** on a frozen folder, whether or not that folder is dirty. Double-clicking (or double-tapping) the status line remains a shortcut.
 
 ---
 
@@ -408,6 +408,22 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 ---
 
 ## Version history
+
+### 5.4
+
+- **Rebuild Frolist** is always present in a frozen folder's Folder menu
+- The breathing prompt remains limited to the folder that actually changed
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 5.3
+
+- Scope is strictly per folder: the dirty prompt and **Rebuild Frolist** menu item appear only in the folder that actually changed
+- Other frozen folders show neither the prompt nor the menu action
+- The server validates the URI inside each dirty marker, so a marker cannot affect another folder
+- The confirm dialog names the folder being rebuilt
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
 
 ### 5.2
 
