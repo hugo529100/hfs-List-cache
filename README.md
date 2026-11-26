@@ -8,7 +8,7 @@ Typical use cases:
 - Folders where directory scanning makes the first page slow
 - Keeping HFS-native sorting, comments, Fixed-folder-order, and Hide-file behavior on a frozen listing
 
-Current plugin version: **5.6**  
+Current plugin version: **5.7**  
 Storage layout version: **2.6**  
 Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
@@ -206,7 +206,6 @@ Hide-file is a frontend plugin. If a frozen listing bypassed it, hidden files wo
 |---|---:|---|
 | Freeze folders with more entries than | 200 | Freeze only folders above this count; one mode for all frozen folders |
 | Valid for | 31 days | Validity of a frozen listing |
-| Regenerate before | empty | Listings older than this date are rebuilt on the next visit; optional |
 | Debug log | off | Writes debug output to the plugin log and `storage/debug.log` |
 
 ### Page size
@@ -225,11 +224,10 @@ The page size is not configured in the plugin panel. It is read from `page_size`
 A frozen listing is considered stale when:
 
 1. Its 31-day validity period has expired.
-2. It is older than `regenerateBefore`.
-3. The folder entry count is no longer greater than `minEntries`.
-4. The Hide-file signature changed.
-5. The storage layout version (`VERSION_TAG`) changed.
-6. The HFS `page_size` changed (the whole database is cleared at startup).
+2. The folder entry count is no longer greater than `minEntries`.
+3. The Hide-file signature changed.
+4. The storage layout version (`VERSION_TAG`) changed.
+5. The HFS `page_size` changed (the whole database is cleared at startup).
 
 File operations and comments do **not** make the listing stale. They only set the persistent dirty flag and breathe the header status. Rebuild explicitly with a double-click when convenient.
 
@@ -408,6 +406,15 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 ---
 
 ## Version history
+
+### 5.7
+
+- Removed the date-based `regenerateBefore` cutoff, which could make every older frozen folder rebuild again hours later
+- A capture that unexpectedly returns a small/short list no longer deletes the existing frozen copy
+- On startup, index entries whose frozen directory/meta is missing are removed instead of being reported as frozen
+- This prevents the same missing copy from repeatedly producing a rebuild state
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
 
 ### 5.6
 
