@@ -1,4 +1,4 @@
-// List-cache 5.2
+// List-cache 5.3
 // Keeps a frozen copy of the listing of very big folders in the plugin storage, and
 // serves it page by page ("lazy"): opening the folder only loads the first page.
 // The page bar loads exactly the clicked packet; scrolling near the bottom appends the
@@ -52,7 +52,7 @@
 // packets are written and counted; meta.json is written last. A partial build is never
 // referenced.
 
-exports.version = 5.2
+exports.version = 5.3
 exports.description = "Freezes listings of very big folders and serves them page by page, lazily. The first visit starts building the frozen list; the next visit opens instantly."
 exports.apiRequired = 12.3
 exports.repo = "hugo529100/hfs-List-cache"
@@ -220,7 +220,7 @@ exports.init = async api => {
     const isDirty = async uri => {
         try {
             const rec = JSON.parse(await fsp.readFile(dirtyFileFor(uri), 'utf8'))
-            return Boolean(rec && rec.at)
+            return Boolean(rec && rec.at && rec.uri === uri)
         }
         catch { return false }
     }

@@ -384,7 +384,7 @@
         if (!window.HFS || typeof HFS.onEvent !== 'function')
             return
         HFS.onEvent('fileMenu', ({ entry, menu }) => {
-            if (!info || !entry || !entry.isFolder || !Array.isArray(menu))
+            if (!info || !info.dirty || !entry || !entry.isFolder || !Array.isArray(menu))
                 return
             if (menu.some(item => item && item.id === 'lc-rebuild'))
                 return
@@ -412,7 +412,7 @@
         try {
             if (HFS.dialogLib && HFS.dialogLib.confirmDialog)
                 ok = await HFS.dialogLib.confirmDialog('Rebuild frozen list',
-                    'Force a fresh frozen listing for this folder? The current page stays until the rebuild finishes.')
+                    'Rebuild only "' + decodedPath(currentUri) + '"? Other frozen folders stay untouched.')
         }
         catch (e) { ok = false }
         if (!ok)
