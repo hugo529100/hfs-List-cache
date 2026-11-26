@@ -30,8 +30,21 @@
     const NEAR_PX = 600
 
     let info = null
-    let localEntries = null // first tier: complete raw listing, sorted locally
+    let localEntries = null // complete frozen listing
+    let dirtyToastTimer = 0
+    let dirtyBreathTimer = 0
     let localFileShowOpen = false
+    let localListArray = null // last state.list array written by the local pager
+    let localListWrite = false
+    const lcAllCache = new Map() // page-session snapshot: lc_all never changes until refresh
+    const lcMetaCache = new Map() // page-session metadata: keeps Musicplayer+ on the frozen path
+
+    function setLocalList(list) {
+        localListWrite = true
+        localListArray = list
+        state.list = list
+        setTimeout(() => { localListWrite = false }, 0)
+    }
     let currentUri = ''
     let forced = { sort_by: 'name', invert_order: false, folders_first: true, sort_numerics: false }
     let pending = null
@@ -207,25 +220,96 @@
         localPureOrders.clear()
     }
 
-    let localExpandTimer = 0
+    // Videos-player and other local consumers can ask for the exact order currently
+    // used by the list (native sort + Fixed-folder-order overlay). Returns null when
+    // the folder is not in the first-tier local mode.
+    window.__listCacheOrdered = function (uri) {
+        if (!info || !info.localSort || !localEntries || !currentUri)
+            return null
+        try {
+            if (decodedPath(sessionKey(uri)) !== decodedPath(sessionKey(currentUri)))
+                return null
+        }
+        catch (e) { return null }
+        return localOrderForCurrentSort().slice()
+    }
 
-    function renderLocalPage(page, scroll) {
+    function sessionKey(uri) {
+        let u = String(uri || '/')
+        if (!u.startsWith('/'))
+            u = '/' + u
+        if (!u.endsWith('/'))
+            u += '/'
+        return u
+    }
+
+    function decodedPath(value) {
+        try { return decodeURIComponent(value) }
+        catch (e) { return String(value) }
+    }
+
+    function sessionBase() {
+        return sessionKey(currentUri)
+    }
+
+    function updateCachedComment(parentUri, fileUri, comment) {
+        const cached = lcAllCache.get(sessionKey(parentUri))
+        if (!cached || !Array.isArray(cached.entries))
+            return
+        const target = decodedPath(fileUri)
+        const base = sessionKey(parentUri)
+        const name = target.slice(target.lastIndexOf('/') + 1)
+        for (const entry of cached.entries) {
+            if (!entry || entry.n !== name)
+                continue
+            if (comment)
+                entry.comment = comment
+            else
+                delete entry.comment
+            break
+        }
+    }
+
+    let localExpandTimer = 0
+    let fullAssertTimer = 0
+
+    function scheduleFullAssert(uri, tries) {
+        clearTimeout(fullAssertTimer)
+        let left = tries || 10
+        const run = () => {
+            if (!info || currentUri !== uri || !localEntries)
+                return
+            if (!fileShowIsVisible() && !state.loading && !filtering && !state.remoteSearch
+                && state.list !== localListArray) {
+                restoreLocalFull()
+            }
+            if (--left > 0)
+                fullAssertTimer = setTimeout(run, 250)
+        }
+        fullAssertTimer = setTimeout(run, 120)
+    }
+
+    function restoreLocalFull(scroll) {
         if (!info || !info.localSort || !localEntries)
             return
-        const size = Number(info.pageSize) || pageSize()
         const ordered = localOrderForCurrentSort()
-        info.count = ordered.length
-        info.pages = Math.max(1, Math.ceil(ordered.length / size))
-        const p = Math.max(1, Math.min(info.pages, Math.floor(Number(page)) || 1))
-        activePage = p
-        loadedFirst = loadedLast = p
-        state.list = ordered.slice((p - 1) * size, p * size)
-        try { state.page_size = BIG_PAGE }
+        try { state.page_size = Number(info.pageSize) || pageSize() }
         catch (e) { /* ignore */ }
+        const list = [...ordered]
+        localListWrite = true
+        localListArray = list
+        state.list = list
+        setTimeout(() => { localListWrite = false }, 0)
+        info.count = ordered.length
+        info.pages = Math.max(1, Math.ceil(ordered.length / (Number(info.pageSize) || pageSize())))
         buildPager()
-        mountPager()
         if (scroll)
             window.scrollTo({ top: 0 })
+    }
+
+    function renderLocalPage(page, scroll) {
+        // Native HFS paging: never replace the complete list with one page slice.
+        restoreLocalFull(scroll)
     }
 
     function scheduleLocalExpand() {
@@ -254,11 +338,9 @@
         // only add the 2-digit year when the validity actually crosses a year boundary
         const crossYear = !isNaN(from.getTime()) && !isNaN(to.getTime())
             && from.getFullYear() !== to.getFullYear()
-        const mode = info.dirty
-            ? 'Frozen list mode - rebuild needed'
-            : info.localSort
-                ? 'Frozen list mode - local sort'
-                : 'Frozen list mode'
+        if (info.dirty)
+            return 'Changes detected - Folder menu > Rebuild Frolist or double click'
+        const mode = 'Frozen list mode'
         return `${mode} | FRO:${fmtDate(info.updatedAt, crossYear)} / EXP:${fmtDate(info.expires, crossYear)} | ${fmt(info.count)} items / size: ${fmtSize(info.bytes)}`
     }
 
@@ -298,6 +380,158 @@
         document.body.classList.toggle('lc-header-share', available >= needed)
     }
 
+    function addFolderMenuRebuild() {
+        if (!window.HFS || typeof HFS.onEvent !== 'function')
+            return
+        HFS.onEvent('fileMenu', ({ entry, menu }) => {
+            if (!info || !entry || !entry.isFolder || !Array.isArray(menu))
+                return
+            if (menu.some(item => item && item.id === 'lc-rebuild'))
+                return
+            const item = {
+                id: 'lc-rebuild',
+                icon: 'reload',
+                label: 'Rebuild Frolist',
+                onClick() {
+                    forceRebuildFrozen()
+                }
+            }
+            const at = menu.findIndex(item => item && item.id === 'reload')
+            if (at >= 0)
+                menu.splice(at, 0, item)
+            else
+                menu.push(item)
+        })
+    }
+    addFolderMenuRebuild()
+
+    async function forceRebuildFrozen() {
+        if (!info || !currentUri)
+            return
+        let ok = true
+        try {
+            if (HFS.dialogLib && HFS.dialogLib.confirmDialog)
+                ok = await HFS.dialogLib.confirmDialog('Rebuild frozen list',
+                    'Force a fresh frozen listing for this folder? The current page stays until the rebuild finishes.')
+        }
+        catch (e) { ok = false }
+        if (!ok)
+            return
+        const uri = currentUri
+        const previous = info.updatedAt
+        try {
+            const res = await HFS.customRestCall('lc_invalidate', { uri })
+            if (!res || res.error) {
+                notify('Could not start the frozen-list rebuild')
+                return
+            }
+        }
+        catch (e) {
+            notify('Could not start the frozen-list rebuild')
+            return
+        }
+        lcAllCache.delete(sessionKey(uri))
+        lcMetaCache.delete(sessionKey(uri))
+        info.dirty = true
+        ensureSticker()
+        notify('Rebuilding frozen list…')
+        try { HFS.reloadList() }
+        catch (e) { /* next listing request will rebuild */ }
+        const started = Date.now()
+        const timer = setInterval(async () => {
+            if (!info || currentUri !== uri) {
+                clearInterval(timer)
+                return
+            }
+            let meta = null
+            try {
+                const res = await fetch('/~/api/_lc_meta', {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/json',
+                        'x-hfs-anti-csrf': '1'
+                    },
+                    body: JSON.stringify({ uri })
+                })
+                if (res.ok)
+                    meta = await res.json()
+            }
+            catch (e) { /* keep polling */ }
+            if (meta && meta.frozen && meta.updatedAt && meta.updatedAt !== previous) {
+                clearInterval(timer)
+                notify('Frozen list rebuilt')
+                setTimeout(() => location.reload(), 180)
+            }
+            else if (Date.now() - started > 120000) {
+                clearInterval(timer)
+                notify('Rebuild is taking longer than expected; refresh the page later')
+            }
+        }, 1000)
+    }
+
+    function bindStickerDoubleClick(node) {
+        if (!node || node.__lcDoubleClickBound)
+            return
+        node.__lcDoubleClickBound = true
+        let lastTap = 0
+        let lastTrigger = 0
+        const trigger = ev => {
+            if (ev) {
+                ev.preventDefault()
+                ev.stopPropagation()
+                ev.stopImmediatePropagation()
+            }
+            const now = Date.now()
+            if (now - lastTrigger < 1200)
+                return
+            lastTrigger = now
+            forceRebuildFrozen()
+        }
+        node.addEventListener('dblclick', trigger)
+        node.addEventListener('touchend', ev => {
+            if (ev.changedTouches.length !== 1)
+                return
+            const now = Date.now()
+            if (now - lastTap < 400) {
+                lastTap = 0
+                trigger(ev)
+            }
+            else {
+                lastTap = now
+                setTimeout(() => {
+                    if (Date.now() - lastTap >= 400)
+                        lastTap = 0
+                }, 500)
+            }
+        }, { passive: false })
+        node.addEventListener('contextmenu', ev => {
+            ev.preventDefault()
+            ev.stopPropagation()
+            ev.stopImmediatePropagation()
+        })
+    }
+
+    function syncDirtyBreathing(node) {
+        if (!node)
+            return
+        if (!info || !info.dirty) {
+            clearInterval(dirtyBreathTimer)
+            dirtyBreathTimer = 0
+            node.style.opacity = ''
+            return
+        }
+        if (dirtyBreathTimer)
+            return
+        const started = Date.now()
+        dirtyBreathTimer = setInterval(() => {
+            const el = document.getElementById('lc-stats')
+            if (!el || !info || !info.dirty)
+                return
+            const phase = (Date.now() - started) / 2600 * Math.PI * 2
+            el.style.opacity = (0.42 + 0.58 * (0.5 + 0.5 * Math.sin(phase))).toFixed(3)
+        }, 60)
+    }
+
     function ensureSticker() {
         if (!info)
             return null
@@ -314,8 +548,12 @@
                 header.append(node)
         }
         const text = headerText()
+        node.classList.toggle('lc-dirty-flash', !!info.dirty)
+        syncDirtyBreathing(node)
         if (node.textContent !== text)
             node.textContent = text
+        node.title = 'Double-click or double-tap to force a rebuild of the frozen listing'
+        bindStickerDoubleClick(node)
         syncHeaderHeight()
         requestAnimationFrame(syncHeaderShare)
         return node
@@ -702,7 +940,7 @@
             return false
         if (!res)
             return false
-        state.list = [...currentList(), ...toEntries(res.entries)]
+        setLocalList([...currentList(), ...toEntries(res.entries)])
         loadedLast = page
         prefetchNeighbors()
         await nextFrame()
@@ -759,7 +997,7 @@
         const first = rows()[0]
         const beforeTop = first ? first.getBoundingClientRect().top : null
         const beforeCount = rows().length
-        state.list = [...toEntries(res.entries), ...currentList()]
+        setLocalList([...toEntries(res.entries), ...currentList()])
         loadedFirst = page
         if (first && first.isConnected) {
             await nextRender(beforeCount)
@@ -840,7 +1078,7 @@
     }
 
     function refreshActive(force) {
-        if (!info || filtering)
+        if (!info || info.localSort || filtering)
             return
         const now = Date.now()
         if (!force && now - lastActiveAt < 150)
@@ -865,7 +1103,7 @@
     }
 
     function processScroll() {
-        if (!info || filtering)
+        if (!info || info.localSort || filtering)
             return
         const doc = document.scrollingElement || document.documentElement
         if (!doc)
@@ -890,7 +1128,7 @@
     }
 
     window.addEventListener('scroll', () => {
-        if (!info || filtering || scrollQueued)
+        if (!info || info.localSort || filtering || scrollQueued)
             return
         scrollQueued = true
         requestAnimationFrame(() => {
@@ -902,7 +1140,7 @@
     // at the very top there is no further scroll event, so a wheel-up loads the previous
     // packet while keeping the visible row in place
     window.addEventListener('wheel', ev => {
-        if (!info || filtering || busy || ev.deltaY >= 0 || Date.now() < cooldownUntil)
+        if (!info || info.localSort || filtering || busy || ev.deltaY >= 0 || Date.now() < cooldownUntil)
             return
         const doc = document.scrollingElement || document.documentElement
         if (!doc || (window.scrollY || doc.scrollTop || 0) > 2 || loadedFirst <= 1)
@@ -914,7 +1152,7 @@
         if (!info)
             return
         requestAnimationFrame(syncHeaderShare)
-        if (filtering)
+        if (filtering || info.localSort)
             return
         requestAnimationFrame(focusPagerButton)
     }, { passive: true })
@@ -924,6 +1162,10 @@
     function deactivate() {
         seq++
         loadEpoch++
+        clearTimeout(dirtyToastTimer)
+        clearTimeout(fullAssertTimer)
+        clearInterval(dirtyBreathTimer)
+        dirtyBreathTimer = 0
         removePager()
         removeSticker()
         info = null
@@ -975,12 +1217,11 @@
         if (p.my !== seq)
             return
         info = p.info
-        info.dirty = readFrozenDirty(p.uri, p.info.updatedAt)
+        info.dirty = !!(p.dirty || p.info.dirty || readFrozenDirty(p.uri, p.info.updatedAt))
         currentUri = p.uri
         activePage = 1
         loadedFirst = loadedLast = 0
-        document.body.classList.add('lc-frozen')
-        document.body.classList.remove('lc-localsort')
+        document.body.classList.add('lc-frozen', 'lc-localsort')
         document.body.classList.remove('lc-filtering')
         removePager()
         ensureSticker()
@@ -998,18 +1239,34 @@
         info.count = localEntries.length
         info.bytes = Number(res.bytes) || info.bytes
         info.pageSize = Number(info.pageSize) || pageSize()
-        renderLocalPage(1)
+        restoreLocalFull()
         ensureSticker()
         scheduleRefresh()
         syncFilterMode()
         syncLocalFileShow()
+        scheduleFullAssert(p.uri, 16)
     }
 
     async function activate(p) {
+        // Page-session pin: while this document stays open, keep the list it already has.
+        // A background rebuild becomes visible only after a real page refresh.
+        if (info && currentUri === p.uri && info.localSort && localEntries) {
+            info.dirty = info.dirty || p.info.dirty
+            ensureSticker()
+            // HFS.reloadList() may replace state.list with its own freshly fetched copy;
+            // put the page-session slice back so the visible list stays unchanged.
+            setTimeout(() => {
+                if (info && currentUri === p.uri && info.localSort && localEntries) {
+                    renderLocalPage(activePage)
+                    scheduleFullAssert(p.uri, 8)
+                }
+            }, 80)
+            return
+        }
         if (p.info.localSort)
             return activateLocalSort(p)
         info = p.info
-        info.dirty = readFrozenDirty(p.uri, p.info.updatedAt)
+        info.dirty = !!(p.dirty || p.info.dirty || readFrozenDirty(p.uri, p.info.updatedAt))
         currentUri = p.uri
         activePage = 1
         loadedFirst = loadedLast = 0
@@ -1045,7 +1302,17 @@
         if (state.loading)
             return
         if (state.uri && state.uri !== p.uri) {
-            pending = null
+            // A fast folder switch can leave HFS's uri one tick behind. Keep the
+            // pending activation instead of forgetting it; retry until HFS catches up.
+            p.uriWait = (p.uriWait || 0) + 1
+            if (p.uriWait > 100) {
+                pending = null
+                return
+            }
+            setTimeout(() => {
+                if (pending === p && p.my === seq)
+                    maybeActivate()
+            }, 100)
             return
         }
         pending = null
@@ -1113,6 +1380,36 @@
 
     // ---- wiring --------------------------------------------------------------------------
 
+    // Install the page-session cache before the first onUri call, so the initial
+    // lc_meta/lc_all responses are pinned as well.
+    if (typeof HFS !== 'undefined' && typeof HFS.customRestCall === 'function' && !HFS.__lcSessionAll) {
+        const nativeCustomRest = HFS.customRestCall.bind(HFS)
+        HFS.customRestCall = function (name, params, ...rest) {
+            if (name === 'lc_meta' && params && typeof params.uri === 'string') {
+                const key = sessionKey(params.uri)
+                if (lcMetaCache.has(key))
+                    return Promise.resolve(lcMetaCache.get(key))
+                return nativeCustomRest(name, params, ...rest).then(res => {
+                    if (res && !res.error)
+                        lcMetaCache.set(key, res)
+                    return res
+                })
+            }
+            if (name === 'lc_all' && params && typeof params.uri === 'string') {
+                const key = sessionKey(params.uri)
+                if (lcAllCache.has(key))
+                    return Promise.resolve(lcAllCache.get(key))
+                return nativeCustomRest(name, params, ...rest).then(res => {
+                    if (res && !res.error && Array.isArray(res.entries))
+                        lcAllCache.set(key, res)
+                    return res
+                })
+            }
+            return nativeCustomRest(name, params, ...rest)
+        }
+        HFS.__lcSessionAll = true
+    }
+
     HFS.watchState('uri', onUri, true)
     HFS.watchState('loading', value => {
         if (!value)
@@ -1146,6 +1443,26 @@
     })
     for (const key of ['patternFilter', 'showFilter'])
         HFS.watchState(key, () => syncFilterMode())
+
+    // HFS.reloadList() bypasses the normal activation path and can replace state.list
+    // with a freshly fetched full listing. Restore the pinned page slice.
+    HFS.watchState('list', () => {
+        if (!info || !info.localSort || !localEntries || localFileShowOpen)
+            return
+        if (localListWrite) {
+            // HFS may assign its own list synchronously while our write flag is
+            // still set. Re-check shortly instead of leaving the page on 50 rows.
+            setTimeout(() => {
+                if (info && currentUri && localEntries && !localFileShowOpen
+                    && !filtering && !fileShowIsVisible() && state.list !== localListArray)
+                    restoreLocalFull()
+            }, 50)
+            return
+        }
+        if (state.list === localListArray)
+            return
+        renderLocalPage(activePage)
+    })
 
     for (const k in forced)
         HFS.watchState(k, () => {
@@ -1317,10 +1634,12 @@
                     else
                         delete target.comment
                 }
-                if (filtering)
-                    state.list = [...currentList()]
-                else
-                    scheduleLocalExpand()
+                updateCachedComment(atUri, uri, found.comment || '')
+                // Keep the current row order and the cached Fixed order. The tag order
+                // is applied on the next real page load, not while the player is using
+                // this snapshot. Paging through this document keeps the old order.
+                setLocalList([...currentList()])
+                markFrozenDirty(atUri, false)
             }
             else if (filtering)
                 state.list = [...currentList()]
@@ -1354,14 +1673,17 @@
         catch (e) { return false }
     }
 
-    let dirtyToastTimer = 0
-
     function markFrozenDirty(uri, notify) {
         const target = uri || currentUri
         if (!target)
             return
         try { localStorage.setItem(frozenDirtyKey(target), String(Date.now())) }
         catch (e) { /* storage can be disabled */ }
+        try {
+            if (typeof HFS !== 'undefined' && typeof HFS.customRestCall === 'function')
+                HFS.customRestCall('lc_dirty', { uri: target }).catch(() => {})
+        }
+        catch (e) { /* keep the local warning if the marker cannot be written */ }
         if (info && currentUri === target) {
             info.dirty = true
             ensureSticker()
@@ -1372,14 +1694,109 @@
         dirtyToastTimer = setTimeout(() => {
             try {
                 if (typeof HFS.toast === 'function')
-                    HFS.toast('Operation successful. The change will be visible after the frozen list is rebuilt.', 'success')
+                    HFS.toast('Change detected. Use Folder menu > Rebuild Frolist or double click to rebuild the listing.', 'success')
             }
             catch (e) { /* never break the page */ }
         }, 350)
     }
 
-    // delete / rename / create folder / move_files (cut & paste) go through HFS's API
+    // delete / rename / create folder / move_files (cut & paste) go through HFS's API.
+    // None of them rebuild the frozen listing automatically; they only flag the
+    // header so the user can double-click it when convenient.
     const MUTATION_PATH = /\/~\/api\/(?:delete|rename|create_folder|move_files|copy_files|upload)(?:$|[?#])/i
+
+    function targetPath(value) {
+        try {
+            const u = new URL(value, location.origin)
+            return decodedPath(u.pathname)
+        }
+        catch (e) { return decodedPath(String(value || '')) }
+    }
+
+    function pathIsTarget(full, targets) {
+        const value = decodedPath(full)
+        return targets.some(target => {
+            if (!target)
+                return false
+            if (value === target)
+                return true
+            return value.startsWith(target.endsWith('/') ? target : target + '/')
+        })
+    }
+
+    function recalcCachedAll(cached) {
+        if (!cached || !Array.isArray(cached.entries))
+            return
+        cached.count = cached.entries.length
+        const size = Number(cached.pageSize) || pageSize()
+        cached.pages = Math.max(1, Math.ceil(cached.entries.length / size))
+    }
+
+    // Session-only simulation: update the page/player snapshot without touching the
+    // frozen backend. The header stays dirty and a manual double-click rebuild makes
+    // the change permanent.
+    function removeSessionTargets(rawTargets) {
+        if (!info)
+            return false
+        const base = sessionBase()
+        const targets = (rawTargets || []).map(targetPath).filter(Boolean)
+        if (!targets.length)
+            return false
+        let changed = false
+        const cached = lcAllCache.get(base)
+        if (cached && Array.isArray(cached.entries)) {
+            const before = cached.entries.length
+            cached.entries = cached.entries.filter(entry => {
+                const name = String(entry && entry.n || '')
+                const full = base + encodeURIComponent(name.replace(/\/$/, '')) + (name.endsWith('/') ? '/' : '')
+                return !pathIsTarget(full, targets)
+            })
+            if (cached.entries.length !== before) {
+                recalcCachedAll(cached)
+                changed = true
+            }
+        }
+        if (localEntries) {
+            const fullUri = entry => entry.uri || (base + encodeURIComponent(String(entry.n || '').replace(/\/$/, '')) + (String(entry.n || '').endsWith('/') ? '/' : ''))
+            const before = localEntries.length
+            localEntries = localEntries.filter(entry => !(entry && pathIsTarget(fullUri(entry), targets)))
+            if (localEntries.length !== before) {
+                changed = true
+                clearLocalOrders()
+                info.count = localEntries.length
+                ensureSticker()
+                if (!localFileShowOpen)
+                    restoreLocalFull()
+            }
+        }
+        return changed
+    }
+
+    function addSessionEntry(name, isFolder) {
+        if (!info || !localEntries)
+            return false
+        const clean = String(name || '').replace(/^\/+|\/+$/g, '')
+        if (!clean || clean.includes('/'))
+            return false
+        const n = clean + (isFolder ? '/' : '')
+        if (localEntries.some(e => e && e.n === n))
+            return false
+        const now = new Date().toISOString()
+        const raw = { n, s: 0, m: now, c: now }
+        try { localEntries.push(new HFS.DirEntry(n, raw)) }
+        catch (e) { return false }
+        const cached = lcAllCache.get(sessionBase())
+        if (cached && Array.isArray(cached.entries)) {
+            cached.entries.push(raw)
+            recalcCachedAll(cached)
+        }
+        clearLocalOrders()
+        info.count = localEntries.length
+        ensureSticker()
+        if (!localFileShowOpen)
+            restoreLocalFull()
+        return true
+    }
 
     function isInFrozenFolder(url, uri) {
         const base = uri || currentUri
@@ -1398,15 +1815,17 @@
             const promise = nativeFetch.apply(this, args)
             try {
                 const url = typeof args[0] === 'string' ? args[0] : args[0] && args[0].url
+                const init = args[1] || {}
+                const method = String(init.method || (args[0] && args[0].method) || 'GET').toUpperCase()
+                const atUri = currentUri
+                const wasFrozen = !!info
                 if (url && /\/~\/api\/comment(?:$|[?#])/.test(url)) {
-                    const init = args[1] || {}
                     let uri = ''
                     if (typeof init.body === 'string') {
                         try { uri = JSON.parse(init.body).uri || '' }
                         catch (e) { /* not our call */ }
                     }
                     if (uri) {
-                        const atUri = currentUri
                         promise.then(res => {
                             if (res && res.ok)
                                 setTimeout(() => refreshAfterComment(uri, atUri), 250)
@@ -1414,23 +1833,47 @@
                     }
                 }
                 if (url && MUTATION_PATH.test(url)) {
-                    const atUri = currentUri
-                    const wasFrozen = !!info
                     promise.then(res => {
-                        if (res && res.ok && wasFrozen)
-                            markFrozenDirty(atUri, true)
+                        if (!res || !res.ok || !wasFrozen || atUri !== currentUri)
+                            return
+                        let body = null
+                        if (typeof init.body === 'string') {
+                            try { body = JSON.parse(init.body) }
+                            catch (e) { /* not JSON */ }
+                        }
+                        if (/\/create_folder(?:$|[?#])/.test(url) && body && body.name)
+                            addSessionEntry(body.name, true)
+                        else if (/\/delete(?:$|[?#])/.test(url) && body) {
+                            const targets = []
+                            if (body.uri) targets.push(body.uri)
+                            if (Array.isArray(body.uris)) targets.push(...body.uris)
+                            if (targets.length)
+                                removeSessionTargets(targets)
+                        }
+                        markFrozenDirty(atUri, true)
                     }).catch(() => {})
                 }
-                const init = args[1] || {}
-                const method = String(init.method || (args[0] && args[0].method) || 'GET').toUpperCase()
-                if (method === 'PUT' && url) {
-                    const atUri = currentUri
-                    const wasFrozen = !!info
-                    if (wasFrozen && isInFrozenFolder(url, atUri))
-                        promise.then(res => {
-                            if (res && res.ok)
-                                markFrozenDirty(atUri, true)
-                        }).catch(() => {})
+                // HFS deletes a single entry with DELETE (or POST) to the entry URI itself.
+                if (url && (method === 'DELETE' || method === 'POST') && wasFrozen
+                    && !/\/~\/api\//.test(url) && isInFrozenFolder(url, atUri)) {
+                    promise.then(res => {
+                        if (res && res.ok && atUri === currentUri) {
+                            removeSessionTargets([targetPath(url)])
+                            markFrozenDirty(atUri, true)
+                        }
+                    }).catch(() => {})
+                }
+                if (method === 'PUT' && url && wasFrozen && isInFrozenFolder(url, atUri)) {
+                    promise.then(res => {
+                        if (!res || !res.ok || atUri !== currentUri)
+                            return
+                        const target = targetPath(url)
+                        const base = decodedPath(sessionBase())
+                        const name = target.slice(base.length)
+                        if (name && !name.includes('/'))
+                            addSessionEntry(name, false)
+                        markFrozenDirty(atUri, true)
+                    }).catch(() => {})
                 }
             }
             catch (e) { /* never break a fetch */ }
@@ -1452,15 +1895,51 @@
                 const atUri = currentUri
                 const wasFrozen = !!info
                 this.addEventListener('load', function () {
-                    if (!wasFrozen || this.status < 200 || this.status >= 300)
+                    if (!wasFrozen || this.status < 200 || this.status >= 300 || atUri !== currentUri)
                         return
-                    if (this.__lcMethod === 'PUT' && isInFrozenFolder(this.__lcUrl, atUri))
+                    if (this.__lcMethod === 'PUT' && isInFrozenFolder(this.__lcUrl, atUri)) {
+                        const target = targetPath(this.__lcUrl)
+                        const base = decodedPath(sessionBase())
+                        const name = target.slice(base.length)
+                        if (name && !name.includes('/'))
+                            addSessionEntry(name, false)
                         markFrozenDirty(atUri, true)
+                    }
                 })
             }
             catch (e) { /* never break a request */ }
             return nativeSend.apply(this, arguments)
         }
+    }
+
+    // Pin lc_all for the lifetime of this document. Musicplayer+ and the local list
+    // therefore keep one stable snapshot while a background rebuild is running.
+    if (typeof HFS !== 'undefined' && typeof HFS.customRestCall === 'function' && !HFS.__lcSessionAll) {
+        const nativeCustomRest = HFS.customRestCall.bind(HFS)
+        HFS.customRestCall = function (name, params, ...rest) {
+            if (name === 'lc_meta' && params && typeof params.uri === 'string') {
+                const key = sessionKey(params.uri)
+                if (lcMetaCache.has(key))
+                    return Promise.resolve(lcMetaCache.get(key))
+                return nativeCustomRest(name, params, ...rest).then(res => {
+                    if (res && !res.error)
+                        lcMetaCache.set(key, res)
+                    return res
+                })
+            }
+            if (name === 'lc_all' && params && typeof params.uri === 'string') {
+                const key = sessionKey(params.uri)
+                if (lcAllCache.has(key))
+                    return Promise.resolve(lcAllCache.get(key))
+                return nativeCustomRest(name, params, ...rest).then(res => {
+                    if (res && !res.error && Array.isArray(res.entries))
+                        lcAllCache.set(key, res)
+                    return res
+                })
+            }
+            return nativeCustomRest(name, params, ...rest)
+        }
+        HFS.__lcSessionAll = true
     }
 
     // keep the sticker and page bar in place across HFS re-renders
@@ -1476,18 +1955,52 @@
             enhanceSearchDialog()
             syncHeaderHeight()
             syncHeaderShare()
-            if (!filtering)
+            if (!filtering && !(info && info.localSort))
                 mountPager()
         }, 80)
     }
     new MutationObserver(scheduleRefresh).observe(document.body, { childList: true, subtree: true })
+
+    // HFS file-show reads HFS.state.list when it opens, and its Delete action
+    // chooses the next entry from that same list. Put the complete ordered list
+    // in place before HFS opens the dialog, otherwise HFS picks its next entry
+    // from the page-sized slice and the player jumps to the wrong video.
+    if (typeof HFS !== 'undefined' && typeof HFS.fileShow === 'function' && !HFS.__lcFileShowWrapped) {
+        const nativeFileShow = HFS.fileShow.bind(HFS)
+        HFS.fileShow = function (entry, ...rest) {
+            if (info && info.localSort && localEntries && !localFileShowOpen) {
+                localListWrite = true
+                localListArray = localOrderForCurrentSort().slice()
+                try { state.page_size = Number(info.pageSize) || pageSize() }
+                catch (e) { /* ignore */ }
+                state.list = localListArray
+                setTimeout(() => { localListWrite = false }, 0)
+            }
+            return nativeFileShow(entry, ...rest)
+        }
+        HFS.__lcFileShowWrapped = true
+    }
+
+    function fileShowIsVisible() {
+        for (const el of document.querySelectorAll('.file-show')) {
+            if (!el.isConnected)
+                continue
+            const style = getComputedStyle(el)
+            if (style.display === 'none' || style.visibility === 'hidden')
+                continue
+            const rect = el.getBoundingClientRect()
+            if (rect.width > 0 && rect.height > 0)
+                return true
+        }
+        return false
+    }
 
     function syncLocalFileShow() {
         if (!info || !info.localSort || !localEntries) {
             localFileShowOpen = false
             return
         }
-        const open = !!document.querySelector('.file-show')
+        const open = fileShowIsVisible()
         if (open === localFileShowOpen)
             return
         localFileShowOpen = open
@@ -1495,11 +2008,21 @@
             // FileShow navigates HFS.state.list; hand it the complete local list temporarily
             try { state.page_size = Number(info.pageSize) || pageSize() }
             catch (e) { /* ignore */ }
-            state.list = [...localOrderForCurrentSort()]
+            setLocalList([...localOrderForCurrentSort()])
         }
         else {
             renderLocalPage(activePage)
         }
     }
-    new MutationObserver(syncLocalFileShow).observe(document.body, { childList: true, subtree: true })
+    let fileShowSyncTimer = 0
+    const scheduleFileShowSync = () => {
+        clearTimeout(fileShowSyncTimer)
+        fileShowSyncTimer = setTimeout(syncLocalFileShow, 180)
+    }
+    new MutationObserver(scheduleFileShowSync).observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class', 'hidden']
+    })
 })()

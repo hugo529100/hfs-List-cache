@@ -1,4 +1,4 @@
-// List-cache 3.5
+// List-cache 5.2
 // Keeps a frozen copy of the listing of very big folders in the plugin storage, and
 // serves it page by page ("lazy"): opening the folder only loads the first page.
 // The page bar loads exactly the clicked packet; scrolling near the bottom appends the
@@ -52,7 +52,7 @@
 // packets are written and counted; meta.json is written last. A partial build is never
 // referenced.
 
-exports.version = 3.5
+exports.version = 5.2
 exports.description = "Freezes listings of very big folders and serves them page by page, lazily. The first visit starts building the frozen list; the next visit opens instantly."
 exports.apiRequired = 12.3
 exports.repo = "hugo529100/hfs-List-cache"
@@ -64,14 +64,7 @@ exports.config = {
         defaultValue: 200,
         min: 1,
         label: "Freeze folders with more entries than",
-        helperText: "Only listings longer than this are frozen"
-    },
-    localSortUpTo: {
-        type: 'number',
-        defaultValue: 5000,
-        min: 1,
-        label: "Load complete listing in the browser up to",
-        helperText: "First tier: folders up to this size load their whole frozen list once, then use native sorting and paging"
+        helperText: "Every frozen folder uses the same complete-list mode"
     },
     rebuildAfterDays: {
         type: 'number',
@@ -80,21 +73,6 @@ exports.config = {
         unit: "days",
         label: "Valid for",
         helperText: "A frozen listing older than this is built again on the next visit"
-    },
-    largeFoldersOver: {
-        type: 'number',
-        defaultValue: 10000,
-        min: 1,
-        label: "Very large folders over",
-        helperText: "Folders with more entries than this use the longer validity below"
-    },
-    largeRebuildAfterDays: {
-        type: 'number',
-        defaultValue: 365,
-        min: 0.001,
-        unit: "days",
-        label: "Valid for very large folders",
-        helperText: "Default 365 days for folders above the very-large threshold"
     },
     regenerateBefore: {
         type: 'date_time',
@@ -157,15 +135,7 @@ exports.init = async api => {
     }
     // every message goes through the "debug" switch of the plugin settings
     const threshold = () => Math.max(1, positive(cfg('minEntries'), 200))
-    const localSortThreshold = () => Math.max(threshold(), positive(cfg('localSortUpTo'), 5000))
-    const largeThreshold = () => Math.max(1, positive(cfg('largeFoldersOver'), 10000))
-    // validity ladder: very large folders keep their frozen copy much longer
-    const maxAge = meta => {
-        const days = (Number(meta && meta.count) || 0) > largeThreshold()
-            ? positive(cfg('largeRebuildAfterDays'), 365)
-            : positive(cfg('rebuildAfterDays'), 31)
-        return Math.max(0.001, days) * DAY
-    }
+    const maxAge = () => positive(cfg('rebuildAfterDays'), 31) * DAY
 
     // page size is a server setting (config.yaml page_size), read again on every restart
     let currentPageSize = 100
@@ -182,6 +152,9 @@ exports.init = async api => {
             return true
         // the threshold moved above this folder: it should no longer be frozen
         if (Number(meta.count) <= threshold())
+            return true
+        // a file operation explicitly marked this listing as stale
+        if (isInvalid(meta.uri))
             return true
         // Hide-file rules changed (or the plugin was disabled) -> rebuild the visible set
         if (meta.hideSignature !== hideSignature())
@@ -230,6 +203,31 @@ exports.init = async api => {
 
     const hash = s => crypto.createHash('sha1').update(s).digest('hex').slice(0, 8)
 
+    const INVALID_DIR = path.join(storageDir, 'invalid')
+    const invalidFileFor = uri => path.join(INVALID_DIR, hash(uri) + '.json')
+    const isInvalid = uri => {
+        try { return fs.existsSync(invalidFileFor(uri)) }
+        catch { return false }
+    }
+    const markInvalid = uri => queueIo(() => writeFileAtomic(invalidFileFor(uri),
+        JSON.stringify({ uri, at: new Date().toISOString() }, null, 2)))
+    const clearInvalid = uri => fsp.rm(invalidFileFor(uri), { force: true }).catch(() => {})
+
+    // Persistent "changed since freeze" marker. It lives in storage, so every
+    // browser/account sees the rebuild prompt, not only the browser that edited.
+    const DIRTY_DIR = path.join(storageDir, 'dirty')
+    const dirtyFileFor = uri => path.join(DIRTY_DIR, hash(uri) + '.json')
+    const isDirty = async uri => {
+        try {
+            const rec = JSON.parse(await fsp.readFile(dirtyFileFor(uri), 'utf8'))
+            return Boolean(rec && rec.at)
+        }
+        catch { return false }
+    }
+    const markDirty = uri => queueIo(() => writeFileAtomic(dirtyFileFor(uri),
+        JSON.stringify({ uri, at: new Date().toISOString() }, null, 2)))
+    const clearDirty = uri => fsp.rm(dirtyFileFor(uri), { force: true }).catch(() => {})
+
     function dirFor(uri) {
         const slug = uri.replace(/^\/+/, '')
             .replace(/[^A-Za-z0-9._-]+/g, '_')
@@ -244,6 +242,10 @@ exports.init = async api => {
         try { await fsp.rm(LISTS_DIR, { recursive: true, force: true }) }
         catch { /* nothing to clean */ }
         try { await fsp.rm(path.join(storageDir, 'snapshots'), { recursive: true, force: true }) }
+        catch { /* nothing to clean */ }
+        try { await fsp.rm(INVALID_DIR, { recursive: true, force: true }) }
+        catch { /* nothing to clean */ }
+        try { await fsp.rm(DIRTY_DIR, { recursive: true, force: true }) }
         catch { /* nothing to clean */ }
         index = { format: FORMAT, folders: {} }
         metaCache.clear()
@@ -892,6 +894,8 @@ exports.init = async api => {
             updatedAt: meta.updatedAt
         }
         await saveIndex()
+        await clearInvalid(uri)
+        await clearDirty(uri)
         log('frozen', uri, clean.length, 'in', chunks.length, 'pages ->', dir)
         api.setTimeout(() => cleanupOldGens(dir).catch(() => {}), 60_000)
     }
@@ -905,6 +909,8 @@ exports.init = async api => {
         metaCache.delete(rec.dir)
         try { await fsp.rm(rec.dir, { recursive: true, force: true }) }
         catch { /* already gone */ }
+        await clearInvalid(uri)
+        await clearDirty(uri)
     }
 
     function pageSize() {
@@ -1154,16 +1160,7 @@ exports.init = async api => {
                 const known = Boolean(meta && meta.accounts && meta.accounts[account])
                 if (!meta || !known)
                     return
-                if (meta.count <= localSortThreshold())
-                    return // first tier: native search over the complete local list/disk
-                if (sse)
-                    return serveSearchSse(ctx, uri, rec.dir, meta, account, params)
-                const list = await searchEntries(rec.dir, meta, params).catch(() => null)
-                if (!list)
-                    return
-                try { await overlayComments(uri, list) }
-                catch (e) { /* comments must not break the search */ }
-                ctx.body = { ...propsFor(meta, account), list }
+                // Every frozen folder is a complete local list; let HFS search natively.
                 return
             }
 
@@ -1217,6 +1214,14 @@ exports.init = async api => {
             }
         }
         const updated = Date.parse(meta.updatedAt) || 0
+        if (isInvalid(uri)) {
+            const account = userOf(ctx)
+            return {
+                frozen: false,
+                building: building.has(uri + '|' + account),
+                large: false
+            }
+        }
         if (Number(meta.count) <= threshold()) {
             const account = userOf(ctx)
             return {
@@ -1234,7 +1239,8 @@ exports.init = async api => {
             updatedAt: meta.updatedAt,
             expires: new Date(updated + maxAge(meta)).toISOString(),
             alphabet: meta.alphabet || {},
-            localSort: meta.count <= localSortThreshold(),
+            localSort: true,
+            dirty: await isDirty(uri),
             sort: meta.sort || { invert: false, numeric: false, foldersFirst: true }
         }
     }
@@ -1320,7 +1326,35 @@ exports.init = async api => {
         return { comment: map.get(path.basename(full)) || '' }
     }
 
-    return { middleware, customRest: { lc_meta, lc_page, lc_all, lc_comment } }
+    // used by the frontend right after a file operation; the current page keeps its
+    // in-memory listing and the frozen copy is rebuilt in the background
+    async function lc_dirty(params, ctx) {
+        if (!ready)
+            return { error: 'not ready' }
+        const uri = normalizeUri(params && params.uri)
+        const rec = index.folders[uri]
+        const meta = rec && await readMeta(rec.dir)
+        const account = userOf(ctx)
+        if (!meta || !meta.accounts || !meta.accounts[account])
+            return { error: 'forbidden' }
+        await markDirty(uri)
+        return { ok: true, dirty: true, at: new Date().toISOString() }
+    }
+
+    async function lc_invalidate(params, ctx) {
+        if (!ready)
+            return { error: 'not ready' }
+        const uri = normalizeUri(params && params.uri)
+        const rec = index.folders[uri]
+        const meta = rec && await readMeta(rec.dir)
+        const account = userOf(ctx)
+        if (!meta || !meta.accounts || !meta.accounts[account])
+            return { error: 'forbidden' }
+        await markInvalid(uri)
+        return { ok: true }
+    }
+
+    return { middleware, customRest: { lc_meta, lc_page, lc_all, lc_comment, lc_dirty, lc_invalidate } }
 }
 
 

@@ -39,6 +39,19 @@ body.lc-frozen.lc-filtering #lc-paging {
     display: none !important;
 }
 
+/* first tier: one native HFS list, native sorting and native paging */
+body.lc-frozen.lc-localsort #paging {
+    display: flex !important;
+}
+
+body.lc-frozen.lc-localsort #lc-paging {
+    display: none !important;
+}
+
+body.lc-frozen.lc-localsort #folder-stats {
+    display: none !important;
+}
+
 #lc-paging {
     display: flex;
     flex-wrap: nowrap;
@@ -188,8 +201,19 @@ body.lc-frozen #lc-stats {
     margin: 0;
     padding: 0 0 1px;
     color: var(--text);
-    pointer-events: none;
+    pointer-events: auto;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-user-drag: none;
+    touch-action: manipulation;
     z-index: 2;
+}
+
+body.lc-frozen #lc-stats.lc-dirty-flash {
+    color: #ff9900;
+    font-weight: 600;
 }
 
 body.lc-frozen.lc-header-share header {
