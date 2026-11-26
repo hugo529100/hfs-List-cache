@@ -8,7 +8,7 @@ Typical use cases:
 - Folders where directory scanning makes the first page slow
 - Keeping HFS-native sorting, comments, Fixed-folder-order, and Hide-file behavior on a frozen listing
 
-Current plugin version: **3.5**  
+Current plugin version: **5.2**  
 Storage layout version: **2.6**  
 Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
@@ -18,15 +18,13 @@ Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
 - Automatically freezes folders above the configured threshold
 - Splits the frozen listing into pages for fast first-page loading
-- Three tiers: no freeze for small folders, a complete local list for the first tier, lazy paging for the second tier
-- First tier loads the complete listing into the browser for full-list sorting, comment reordering, and full FileShow navigation
-- Second tier loads only the current page and continues lazily while scrolling
-- Comments are overlaid from `descript.ion` on every read, so comment edits do not require a rebuild
-- Fixed-folder-order is the highest-priority sort; the first tier uses a separate second list, while the second tier applies it to the loaded page
+- One freeze threshold; every frozen folder uses the same mode
+- Complete listing loaded into native `HFS.state.list`; HFS native pager, sorting, filter, and file-show
+- File operations and comments never rebuild automatically; the header breathes until the user runs Folder menu > Rebuild Frolist
+- Fixed-folder-order remains the highest-priority sort over the complete list
+- HFS native search UI is preserved
 - Hide-file rules are applied when the frozen listing is created; a rule change triggers a rebuild
-- HFS native search UI is preserved; the first tier uses native HFS search, the second tier searches the frozen packets
-- A one-line status appears at the bottom of the header; on wide screens it shares the bottom row with the breadcrumb buttons
-- The native folder-statistics label is hidden in frozen mode to avoid duplicate counts
+- Folder menu > Rebuild Frolist (or double-click / double-tap the header status) forces a rebuild
 
 ---
 
@@ -49,37 +47,38 @@ The first visit to a folder above the threshold still lets HFS produce the listi
 
 ---
 
-## Three tiers
+## Single freeze threshold
 
 | Folder entry count | Behavior |
 |---|---|
 | `<= minEntries` (default 200) | Not frozen; HFS native listing |
-| `201 - localSortUpTo` (default 5,000) | **First tier**: one complete frozen listing; the browser loads the whole list once, then sorts and pages locally |
-| `localSortUpTo + 1 - largeFoldersOver` (default 5,001 - 10,000) | **Second tier**: lazy loading; only the current page is fetched; normal validity (default 31 days) |
-| `> largeFoldersOver` (default 10,000) | Second tier lazy loading with the long validity period (default 365 days) |
+| `> minEntries` | One complete frozen listing; HFS native pager, sorting, filter, and file-show |
 
-Thresholds are strict "greater than" comparisons:
-
-- 200 entries: not frozen
-- 201 entries: freezing starts
-- 5,000 entries: first tier
-- 5,001 entries: second tier
-- 10,000 entries: normal validity
-- 10,001 entries: long validity
-
-If `localSortUpTo` is lower than `minEntries`, the effective first-tier ceiling is raised to `minEntries`.
+The threshold is a strict "greater than" comparison: 200 entries is not frozen; 201 starts freezing. Every frozen folder uses the same complete native-list mode. There is no second lazy tier and no size-dependent validity.
 
 ---
 
-## First tier: the complete listing in the browser
-
-Applies to 201 - 5,000 entries by default.
+## Frozen folders: the complete listing in HFS
 
 1. Opening the folder returns one complete frozen listing from the backend.
-2. The browser keeps the complete list as the local sorting source.
-3. Only the current page is rendered (50 entries by default); thousands of DOM nodes are not created at once.
-4. The plugin uses its own pager instead of the HFS native pager.
-5. Sorting, paging, and comment reordering all happen in the browser.
+2. The browser keeps that complete list in `HFS.state.list`, exactly as if HFS had scanned the folder.
+3. HFS uses its normal page size, native pager, native sorting, and native file-show dialog on top of that list.
+4. List-cache only supplies/caches the listing data; it does not create a second page-aware list for the UI.
+5. Thousands of DOM rows are never rendered at once because HFS still renders one page.
+
+### Page-session snapshot
+
+While the document stays open, the plugin keeps the listing it already loaded:
+
+- `lc_all` is cached in memory for the lifetime of the page, so Musicplayer+ and other consumers always receive the same snapshot.
+- `lc_meta` is cached for the same page session.
+- HFS `reloadList()` may replace `state.list`; the plugin restores the complete ordered listing.
+- File operations and comment edits do **not** invalidate or rebuild the frozen backend.
+- A delete or upload updates only the page-session `lc_all` copy and the visible page list; the frozen database is untouched.
+- This keeps the page/playlist count in sync immediately after a delete without rebuilding.
+- A comment still updates its row text immediately, but Fixed tag reordering waits for the explicit rebuild/page reload.
+- Nothing is rebuilt in the background behind the player; the header breathes until the user runs Folder menu > Rebuild Frolist.
+- A hidden leftover `.file-show` no longer keeps the page in page-slice mode; the complete list is restored as soon as the dialog is actually invisible.
 
 ### Sorting
 
@@ -94,7 +93,7 @@ The first tier supports the full HFS sort state:
 - `folders_first`
 - `sort_numerics`
 
-Sorting applies to the complete local list, not just the current page.
+Sorting uses HFS's native controls over the complete list, not just the current page.
 
 ### Fixed-folder-order second list
 
@@ -111,7 +110,7 @@ As a result:
 - Fixed comment tags, file patterns, and folder patterns remain the highest priority.
 - When Fixed is disabled, the native sorted list is used directly.
 
-A comment change clears and rebuilds the Fixed second list. Sort changes rebuild the corresponding caches.
+Comment text is updated in place. The new Fixed tag order is applied on the next real page load, not in the current player session. Sort changes rebuild the corresponding caches.
 
 ### Fixed plugin configuration
 
@@ -132,38 +131,34 @@ For comment tags to take effect:
 
 List-cache does not duplicate Fixed's configuration. It calls the HFS `sortCompare` event in the browser.
 
+### Videos-player
+
+Videos-player builds its playlist from the complete ordered `lc_all` listing, including the Fixed-folder-order comment-tag overlay. When List-cache removes a deleted file from the page-session list, Videos-player 5.0 applies that updated list immediately, so the playlist count decreases and the deleted row disappears without a backend rebuild. The frozen database itself is only replaced by the manual double-click rebuild.
+
+Videos-player does not intercept HFS's file-show menu or Delete API. HFS keeps its normal Delete flow and native confirmation. While the player playlist is open, Videos-player only:
+
+- closes a stale `.file-menu` when the HFS delete confirmation appears
+- treats a second Delete as confirmation of that HFS delete dialog
+
+Hotkey is not modified. When the last playlist item ends naturally, playback wraps to the first item and the playlist scrolls back to the top. A manual double-click rebuild is what makes the change permanent in the frozen database; the current page/player use the session copy.
+
 ### FileShow / image browsing
 
-In the first tier, `HFS.state.list` normally contains only the current page. When the HFS `.file-show` dialog opens, the plugin temporarily places the complete local list into `state.list`, so FileShow can navigate every file. The current page is restored when the dialog closes.
+In the first tier, `HFS.state.list` contains the complete frozen listing. HFS FileShow therefore navigates every file exactly like a native folder. Before opening the dialog, List-cache also places the complete ordered list in place so HFS's own Delete/next selection follows the visible order.
 
 ### Header status
 
 Frozen mode shows one line at the bottom of the header:
 
 ```text
-Frozen list mode - local sort | FRO:11-25 / EXP:12-26 | 3,485 items / size: 98.4 MB
+Frozen list mode | FRO:11-25 / EXP:12-26 | 3,485 items / size: 98.4 MB
 ```
 
 - On wide screens, when there is enough room on the right, it shares the bottom row with the breadcrumb buttons.
 - On narrow screens or with a long path, it automatically returns to its own line.
 - The native `#folder-stats` label is hidden to avoid two count modules.
-- `rebuild needed` replaces `local sort` when a rebuild is required.
-
----
-
-## Second tier: lazy loading
-
-Applies to folders above `localSortUpTo` (5,000 by default).
-
-- Opening the folder requests only the first page.
-- The plugin pager at the bottom loads exactly the clicked packet.
-- Scrolling near the bottom appends the next page; scrolling upward at the top loads the previous page.
-- Sorting controls are disabled. The listing keeps the frozen name/folder order determined by the HFS configuration.
-- Fixed-folder-order is applied only to the currently loaded page, never to the whole database.
-- Search requests are answered from the frozen packets; comment search uses native HFS search.
-- Very large folders use the longer validity period.
-
-The second tier does not load the complete list into the browser, so FileShow can only navigate the currently loaded window.
+- When a change is detected, the line changes to `Changes detected - Folder menu > Rebuild Frolist or double click` and breathes through a JavaScript opacity animation. The dirty marker is stored server-side, so every browser sees it.
+- The current folder's breadcrumb menu gets a **Rebuild Frolist** item directly above **Reload**. Double-clicking (or double-tapping) the status line remains a shortcut.
 
 ---
 
@@ -171,15 +166,13 @@ The second tier does not load the complete list into the browser, so FileShow ca
 
 ### Search
 
-- **First tier**: requests go to native HFS search, which searches the current folder/disk directly.
-- **Second tier**: HFS search requests are answered by List-cache from the frozen packets, including paging.
-- **Comment search**: always uses native HFS search, because comments may change after the freeze.
+- Frozen folders use native HFS search against the current folder/disk.
+- Comment search always uses native HFS search, because comments may change after the freeze.
 - The search dialog can explicitly request HFS native recursive search (`lcNative`).
 
 ### Filtering
 
-- **Second tier**: opening the HFS native filter loads the complete frozen list and hands it to HFS for native filtering and paging.
-- **First tier**: the list is managed by the plugin pager, so the HFS native filter only applies to the current page. Full local filtering for the first tier is not implemented yet.
+The complete frozen list is in `HFS.state.list`, so the native HFS filter and paging operate over the whole listing.
 
 ---
 
@@ -187,10 +180,11 @@ The second tier does not load the complete list into the browser, so FileShow ca
 
 Comments come from `descript.ion` in the folder.
 
-- Every page, complete listing, and search response overlays the current `descript.ion` comments.
-- Editing a comment therefore does not require rebuilding the frozen listing.
-- Comments changed through the HFS UI update the current list; the first-tier Fixed second list is invalidated and rebuilt.
-- After editing `descript.ion` directly, reload the page or revisit the folder.
+- Every page and complete listing overlays the current `descript.ion` comments.
+- Editing a comment does not rebuild the frozen listing. The row text updates immediately and the folder is flagged dirty.
+- Fixed tag reordering waits for the explicit rebuild.
+- File adds/deletes/renames are not simulated in the frozen snapshot; the flag tells the user to rebuild when ready.
+- External `descript.ion` edits require a page reload.
 - Comment search always uses native HFS search.
 
 ---
@@ -210,11 +204,8 @@ Hide-file is a frontend plugin. If a frozen listing bypassed it, hidden files wo
 
 | Setting | Default | Description |
 |---|---:|---|
-| Freeze folders with more entries than | 200 | Freeze only folders above this count |
-| Load complete listing in the browser up to | 5000 | First-tier ceiling; larger folders use lazy loading |
-| Valid for | 31 days | Validity of a normal frozen listing |
-| Very large folders over | 10000 | Folders above this use the long validity period |
-| Valid for very large folders | 365 days | Validity for very large folders |
+| Freeze folders with more entries than | 200 | Freeze only folders above this count; one mode for all frozen folders |
+| Valid for | 31 days | Validity of a frozen listing |
 | Regenerate before | empty | Listings older than this date are rebuilt on the next visit; optional |
 | Debug log | off | Writes debug output to the plugin log and `storage/debug.log` |
 
@@ -233,14 +224,16 @@ The page size is not configured in the plugin panel. It is read from `page_size`
 
 A frozen listing is considered stale when:
 
-1. Its validity period has expired (31 days normally, 365 days for very large folders).
+1. Its 31-day validity period has expired.
 2. It is older than `regenerateBefore`.
-3. The folder entry count is no longer greater than `minEntries` (old database after the threshold was raised).
+3. The folder entry count is no longer greater than `minEntries`.
 4. The Hide-file signature changed.
 5. The storage layout version (`VERSION_TAG`) changed.
 6. The HFS `page_size` changed (the whole database is cleared at startup).
 
-A stale listing is rebuilt on the next visit. During a rebuild, requests that arrive after the build has started can still read the previous copy. The new copy is used when the build completes.
+File operations and comments do **not** make the listing stale. They only set the persistent dirty flag and breathe the header status. Rebuild explicitly with a double-click when convenient.
+
+A stale listing is rebuilt on the next listing request. The user-triggered rebuild marks it invalid, reloads the native listing, waits for the new `updatedAt`, then reloads the page.
 
 > After raising `minEntries`, old frozen databases for small folders are no longer used. The next visit goes through the HFS native listing and removes the old record.
 
@@ -255,6 +248,8 @@ storage/
   settings.json                 pageSize used for the database
   folders.json                  uri -> { dir, count, updatedAt }
   version.json                  storage layout version
+  invalid/                      per-folder rebuild markers written by lc_invalidate
+  dirty/                        per-folder "changed since freeze" markers, shared by all browsers
   debug.log                     created only when debug is enabled
   lists/
     <slug>-<hash>/
@@ -301,8 +296,10 @@ Used by the frontend and for debugging. HFS adds an underscore prefix:
 |---|---|
 | `lc_meta` | Returns frozen status, entry count, page size, validity, and first-tier flag |
 | `lc_page` | Reads one frozen page |
-| `lc_all` | Reads the complete frozen listing (first-tier local sorting and filtering) |
+| `lc_all` | Reads the complete frozen listing used as the native first-tier list |
 | `lc_comment` | Reads/refreshes comment data |
+| `lc_dirty` | Persists the "changed since freeze" marker shared by all browsers |
+| `lc_invalidate` | Marks a frozen listing invalid for the manual rebuild |
 
 The backend also hooks the HFS `get_file_list` request to intercept normal listing requests.
 
@@ -313,7 +310,7 @@ The backend also hooks the HFS `get_file_list` request to intercept normal listi
 ```text
 List-cache/
   plugin.js              Backend: capture, packet writing, index, validity, Hide-file, comments, API
-  public/main.js         Frontend: tier entry, first-tier local sorting/paging, Fixed second list, FileShow, search UI
+  public/main.js         Frontend: tier entry, native first-tier list integration, Fixed second list, search UI
   public/style.css       Header status, pager, native statistics hiding, narrow-screen layout
   README.md              This file
 ```
@@ -335,9 +332,13 @@ The first visit lets HFS scan the directory and build the frozen copy. It become
 - The current account has not yet been served that folder by HFS.
 - The folder is currently being built.
 
+### I deleted a file and refreshed before rebuilding
+
+The delete updates the current session immediately, but a full page refresh falls back to the frozen database, which still contains the deleted entry. The header breathes the rebuild prompt; use Folder menu > Rebuild Frolist to make the deletion permanent. This is the trade-off for never rebuilding while the player is running.
+
 ### Sorting controls are disabled
 
-The second-tier lazy mode intentionally disables sorting to avoid sorting only the current page incorrectly. To get full sorting, raise `localSortUpTo` so the folder falls into the first tier.
+There is no lazy second tier now. If sorting controls are disabled, check that the folder is not open in an older cached page; force-refresh the browser.
 
 ### Fixed order does not take effect
 
@@ -347,11 +348,11 @@ Check:
 2. **Enable Custom Sorting** is enabled in its Options dialog.
 3. `commentOrderEnabled` is true.
 4. The files really have `descript.ion` comments.
-5. The second tier applies Fixed only to the loaded page; the first tier uses the complete second list.
+5. Rebuild the frozen listing after adding or editing comments.
 
 ### The order does not change after editing a comment
 
-- Comment changed through the HFS UI: the current page refreshes and the first-tier Fixed list is rebuilt.
+- Comment changed through the HFS UI: the row text updates immediately; the new Fixed tag order is applied on the next page load.
 - `descript.ion` edited directly: reload the page.
 - Comment search uses native HFS search and does not use the frozen listing.
 
@@ -379,10 +380,10 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 ## Known limitations
 
 - The first tier keeps the complete listing in memory up to `localSortUpTo` (5,000 by default).
-- The first-tier HFS native filter applies only to the current page; full local filtering is not implemented yet.
-- In the second tier, FileShow can navigate only the loaded window.
-- The second tier disables sorting controls and applies Fixed only to the current page.
+- Every frozen folder keeps the complete listing in memory; very large folders use more memory.
+- File/comment edits update the frozen copy only after the manual rebuild.
 - Comments are read from `descript.ion`; external edits require a page reload.
+- Fixed comment-tag ordering appears after the manual rebuild.
 - Extremely large directories above 3,000,000 entries hit the capture safety limit.
 
 ---
@@ -392,9 +393,9 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 - Backend entry point: `exports.init(api)` in `plugin.js`
 - Frontend entry points: `public/main.js`, `public/style.css`
 - Storage layout constants: `FORMAT`, `VERSION_TAG`
-- First-tier test: `meta.count <= localSortThreshold()`
-- First-tier local sorting: `localPureOrder()` and `localOrderForCurrentSort()` in `public/main.js`
-- Fixed second list: the stable overlay sort inside `localOrderForCurrentSort()`
+- Freeze decision: `meta.count > threshold()`
+- Native list ordering: `localPureOrder()` and `localOrderForCurrentSort()` in `public/main.js`
+- Fixed overlay: the stable sort inside `localOrderForCurrentSort()`
 - Syntax check after changes:
 
   ```bash
@@ -408,6 +409,152 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 
 ## Version history
 
+### 5.2
+
+- Fixed fast folder switching sometimes leaving a frozen folder on HFS's 50-row native page
+- A pending activation now retries while HFS's `state.uri` is still one tick behind instead of being discarded
+- After activation the complete list is asserted several times over the next few seconds
+- If HFS writes its list during our own `localListWrite` flag, the watcher re-checks shortly instead of giving up
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 5.1
+
+- Replaced the DOM-cloned folder-menu item with the native `HFS.onEvent('fileMenu')` hook
+- Fixes the duplicate folder menu and the unwanted navigation to the parent folder
+- The item remains directly above **Reload** and no longer carries a plugin sub-label
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 5.0
+
+- Removed the `List-cache` sub-label under **Rebuild Frolist**
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.9
+
+- Renamed the folder-menu action to **Rebuild Frolist**
+- The breathing prompt now reads `Changes detected - Folder menu > Rebuild Frolist or double click`
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.8
+
+- Added **Rebuild Frolist** to the current folder's breadcrumb/Folder menu, directly above **Reload**
+- The dirty header prompt now says `Changes detected - Folder menu > Rebuild Frolist`
+- Double-clicking the status still works as a shortcut
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.7
+
+- The "changes detected" state is stored in `storage/dirty/<hash>.json`, so every browser and account sees the rebuild prompt
+- The header prompt no longer toggles text; it breathes through a JavaScript opacity animation (this also works when the OS/browser disables CSS animations)
+- `lc_meta` returns `dirty`; a successful rebuild clears the marker
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.6
+
+- Fixed the second delete crash in Videos-player
+- The frozen playlist sync no longer auto-advances while HFS is remounting the file-show dialog; HFS owns the next selection
+- Session delete/upload updates are applied immediately to `lc_all` but the page list is restored only after the file-show dialog actually closes
+- File-show close detection is debounced (180 ms), so a transient remount no longer triggers a page-list restore in the middle of a delete
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.5
+
+- Fixed Videos-player deletion leaving the page with a short/stale `HFS.state.list` after the player closes
+- `syncLocalFileShow()` now checks whether a file-show dialog is actually visible and observes style/class/hidden changes, so a hidden leftover dialog cannot keep the page in page-slice mode
+- Deletes and uploads now update the page-session `lc_all`/page list only; the frozen backend is still not rebuilt
+- Videos-player 5.0 reads the updated session list, so a delete immediately reduces the playlist count instead of leaving the deleted row behind
+- No new backend generation, no `lc_remove`, no `lc_invalidate` on normal operations
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.4
+
+- Simplified to one freeze threshold; every frozen folder uses the same complete native list mode
+- File operations, comments, renames, moves, uploads, and deletes no longer rebuild or invalidate the frozen listing automatically
+- Changes only set the persistent dirty prompt; use Folder menu > Rebuild Frolist when you want to rebuild
+- The automatic delete-generation and `lc_remove` flow was removed
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.3
+
+- Replaced long-press rebuild with double-click / double-tap on `#lc-stats`
+- Mobile double-tap no longer opens the context menu and a single tap does nothing
+- The HFS confirmation and background rebuild flow is unchanged
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.2
+
+- Fixed mobile long-press on `#lc-stats` opening the browser context menu
+- Touch long-press now suppresses the context menu and either starts the rebuild timer or triggers the rebuild at the native long-press event
+- A swipe still cancels the gesture; a short tap does nothing
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.1
+
+- Long-press the `#lc-stats` header status to force a fresh frozen listing
+- The action confirms in an HFS dialog, marks the listing invalid, reloads the native listing to start a background capture, and reloads the page when the new `updatedAt` is visible
+- Pointer and touch handling cancel if the pointer moves, so normal header use is unaffected
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 4.0
+
+- First-tier UI redesigned to match a native HFS folder: `HFS.state.list` holds the complete frozen listing, and HFS uses its normal page size, native pager, native sorting, filter, and file-show dialog
+- List-cache now only supplies and caches the listing data; it no longer gives the UI its own page-aware list
+- HFS file-show opens with the complete ordered listing, so Delete/next follows the visible order and the file list no longer disappears
+- Verified with 200+ valid videos using random names containing spaces, `#`, apostrophes, parentheses, and Chinese characters
+- Videos-player 4.8 does not intercept HFS's file-show menu/Delete; it only clears a stale file menu at the confirmation step and lets the existing Hotkey Delete confirm with a second Delete
+- Two consecutive native deletions remain stable, with no leftover menu or extra frames
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 3.9
+
+- HFS `fileShow` is opened with the complete ordered List-cache listing, so HFS's own Delete/next selection matches the visible playlist order
+- Deleting the current video resumes with the next visibly listed item; a short watchdog re-asserts it if HFS reloads the dialog with a different entry
+- Natural end of the playlist wraps to the first item and scrolls the playlist list back to the top
+- Verified with 200+ valid test videos, `top/3/2/1` comments, Fixed-folder-order, and Videos-player
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 3.8
+
+- Videos-player now consumes the exact List-cache ordered list, including the Fixed-folder-order comment-tag overlay
+- A `sortCompare` fallback keeps comment-tag order in the player for lazy folders
+- Playlist scroll and current-row focus remain stable when HFS remounts the file-show dialog after deletion
+- Deleting the current video resumes with the next visibly listed item; natural end of the playlist wraps to the first item and scrolls the list back to the top
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 3.7
+
+- Videos-player loads its playlist from the complete `lc_all` listing instead of the page-sized HFS state list
+- Videos-player ignores page-sized HFS snapshot patches while a frozen folder is open, so deleting a video keeps the whole playlist
+- Playlist scroll position and current-row focus are preserved across the dialog remount caused by HFS file operations
+- `lc_all` page-session cache is also updated for lazy folders after a deletion
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 3.6
+
+- Page-session `lc_all`/`lc_meta` caches keep the current list and Musicplayer+ playlist stable during rebuilds
+- Continuous first-tier next-page loading fixed when the list watcher restores the pinned page slice
+- Delete writes a new frozen generation atomically through `lc_remove`; no full rescan is required
+- Comment text updates immediately; Fixed tag reordering is deferred until the next page load
+- Videos-player integration uses the complete `lc_all` listing and ignores page-sized HFS state patches
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
 ### 3.5
 
 - Three tier boundaries: 200 / 5,000 / 10,000
@@ -417,6 +564,7 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 - Header status is a single line and shares the bottom row with breadcrumb buttons on wide screens
 - Native folder statistics hidden
 - Internal master switch removed; enabling the plugin in HFS is enough
+- Page-session snapshot: stable Musicplayer+ playlist, local delete/upload simulation, deferred Fixed comment order, background rebuild via `lc_invalidate`, and atomic delete generations via `lc_remove`
 
 Storage layout: `VERSION_TAG = 2.6`. These frontend changes do not clear the database.
 
