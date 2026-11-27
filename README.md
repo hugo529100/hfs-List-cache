@@ -8,7 +8,7 @@ Typical use cases:
 - Folders where directory scanning makes the first page slow
 - Keeping HFS-native sorting, comments, Fixed-folder-order, and Hide-file behavior on a frozen listing
 
-Current plugin version: **5.7**  
+Current plugin version: **6.0**  
 Storage layout version: **2.6**  
 Requirements: HFS **3.4.1** (plugin API 12.3) or a compatible version
 
@@ -156,6 +156,7 @@ Frozen list mode | FRO:11-25 / EXP:12-26 | 3,485 items / size: 98.4 MB
 
 - On wide screens, when there is enough room on the right, it shares the bottom row with the breadcrumb buttons.
 - On narrow screens or with a long path, it automatically returns to its own line.
+- Width measurement uses a canvas and a hysteresis margin, so breadcrumb hover cannot flip the layout back and forth.
 - The native `#folder-stats` label is hidden to avoid two count modules.
 - When a change is detected, the line changes to `Changes detected - Folder menu > Rebuild Frolist or double click` and breathes through a JavaScript opacity animation. The dirty marker is stored server-side, so every browser sees it.
 - The current folder's breadcrumb menu always gets a **Rebuild Frolist** item directly above **Reload** on a frozen folder, whether or not that folder is dirty. Double-clicking (or double-tapping) the status line remains a shortcut.
@@ -407,6 +408,32 @@ The native statistics label is hidden in frozen mode. If it is still visible, fo
 
 ## Version history
 
+### 6.0
+
+- Fixed a `HFS.state.list` identity loop: the complete list was rewritten even when its contents were unchanged
+- The list watcher and full-list assertion now compare entry URIs and only write on a real difference
+- Prevents Frontend-toggles from re-ordering the menu bar hundreds of times during hover, which caused flicker and missed clicks
+- Restored the shared header row while keeping canvas measurement and hysteresis
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 5.9
+
+- Restored the shared header row from 5.7
+- Removed the hidden clone used for width measurement; width now comes from canvas text measurement, so no DOM is added/removed during hover
+- Added layout hysteresis so a small breadcrumb hover width change cannot toggle the shared row back and forth
+- This removes the body MutationObserver feedback loop that made the menu-bar search button flicker and become sluggish
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
+### 5.8
+
+- Removed the header `lc-header-share` measurement/toggle loop
+- The frozen status now always stays on its own header line, so hovering the last breadcrumb no longer causes width feedback, flashing, or layout oscillation
+- Removed the unused share-layout CSS
+
+Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
+
 ### 5.7
 
 - Removed the date-based `regenerateBefore` cutoff, which could make every older frozen folder rebuild again hours later
@@ -601,7 +628,7 @@ Storage layout remains `VERSION_TAG = 2.6`; no database clear is required.
 - First tier: complete local list sorting and local paging
 - Fixed-folder-order separate second list: Fixed highest priority, native order as tie-breaker
 - FileShow receives the complete list in the first tier
-- Header status is a single line and shares the bottom row with breadcrumb buttons on wide screens
+- Header status is a single line and can share the bottom row with breadcrumb buttons on wide screens, using canvas measurement plus hysteresis to stay stable
 - Native folder statistics hidden
 - Internal master switch removed; enabling the plugin in HFS is enough
 - Page-session snapshot: stable Musicplayer+ playlist, local delete/upload simulation, deferred Fixed comment order, background rebuild via `lc_invalidate`, and atomic delete generations via `lc_remove`
