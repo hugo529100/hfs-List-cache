@@ -39,7 +39,29 @@
     const lcAllCache = new Map() // page-session snapshot: lc_all never changes until refresh
     const lcMetaCache = new Map() // page-session metadata: keeps Musicplayer+ on the frozen path
 
+    function sameEntryList(a, b) {
+        if (a === b)
+            return true
+        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length)
+            return false
+        for (let i = 0; i < a.length; i++) {
+            const x = a[i]
+            const y = b[i]
+            if (x === y)
+                continue
+            const xr = x && (x.uri || x.n || x.name)
+            const yr = y && (y.uri || y.n || y.name)
+            if (xr !== yr)
+                return false
+        }
+        return true
+    }
+
     function setLocalList(list) {
+        if (sameEntryList(state.list, list)) {
+            localListArray = state.list
+            return
+        }
         localListWrite = true
         localListArray = list
         state.list = list
@@ -280,7 +302,7 @@
             if (!info || currentUri !== uri || !localEntries)
                 return
             if (!fileShowIsVisible() && !state.loading && !filtering && !state.remoteSearch
-                && state.list !== localListArray) {
+                && !sameEntryList(state.list, localListArray)) {
                 restoreLocalFull()
             }
             if (--left > 0)
@@ -296,10 +318,15 @@
         try { state.page_size = Number(info.pageSize) || pageSize() }
         catch (e) { /* ignore */ }
         const list = [...ordered]
-        localListWrite = true
-        localListArray = list
-        state.list = list
-        setTimeout(() => { localListWrite = false }, 0)
+        if (sameEntryList(state.list, list)) {
+            localListArray = state.list
+        }
+        else {
+            localListWrite = true
+            localListArray = list
+            state.list = list
+            setTimeout(() => { localListWrite = false }, 0)
+        }
         info.count = ordered.length
         info.pages = Math.max(1, Math.ceil(ordered.length / (Number(info.pageSize) || pageSize())))
         buildPager()
@@ -355,29 +382,53 @@
         document.body.style.setProperty('--lc-header-btn-h', h + 'px')
     }
 
+    let headerShareOn = false
+    let headerMeasureCtx = null
+
+    function measureStickerWidth(sticker) {
+        const style = getComputedStyle(sticker)
+        if (!headerMeasureCtx)
+            headerMeasureCtx = document.createElement('canvas').getContext('2d')
+        if (headerMeasureCtx)
+            headerMeasureCtx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`
+        return headerMeasureCtx
+            ? headerMeasureCtx.measureText(sticker.textContent || '').width
+            : 0
+    }
+
     function syncHeaderShare() {
-        if (!info)
+        if (!info) {
+            document.body.classList.remove('lc-header-share')
+            headerShareOn = false
             return
+        }
         const sticker = document.getElementById('lc-stats')
         const header = document.querySelector('header')
         if (!sticker || !header) {
             document.body.classList.remove('lc-header-share')
+            headerShareOn = false
             return
         }
         const crumbs = [...header.querySelectorAll('.breadcrumb')]
         if (!crumbs.length) {
             document.body.classList.remove('lc-header-share')
+            headerShareOn = false
             return
         }
         const last = crumbs[crumbs.length - 1].getBoundingClientRect()
         const hr = header.getBoundingClientRect()
-        const clone = sticker.cloneNode(true)
-        clone.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;width:max-content;max-width:none;'
-        document.body.append(clone)
-        const needed = Math.ceil(clone.getBoundingClientRect().width) + 18
-        clone.remove()
+        const needed = Math.ceil(measureStickerWidth(sticker)) + 18
         const available = Math.floor(hr.right - last.right - 12)
-        document.body.classList.toggle('lc-header-share', available >= needed)
+        // Hysteresis: a small breadcrumb hover change must not toggle the layout
+        // back and forth. Canvas measurement avoids appending/removing a clone,
+        // which previously retriggered the body MutationObserver in a loop.
+        const next = headerShareOn
+            ? available >= needed - 16
+            : available >= needed + 16
+        if (next !== headerShareOn) {
+            headerShareOn = next
+            document.body.classList.toggle('lc-header-share', next)
+        }
     }
 
     function addFolderMenuRebuild() {
@@ -1189,6 +1240,7 @@
         document.body.classList.remove('lc-localsort')
         document.body.classList.remove('lc-filtering')
         document.body.classList.remove('lc-header-share')
+        headerShareOn = false
         if (originalPageSize !== undefined && state.page_size !== originalPageSize) {
             try { state.page_size = originalPageSize }
             catch (e) { /* ignore */ }
@@ -1481,13 +1533,15 @@
             // still set. Re-check shortly instead of leaving the page on 50 rows.
             setTimeout(() => {
                 if (info && currentUri && localEntries && !localFileShowOpen
-                    && !filtering && !fileShowIsVisible() && state.list !== localListArray)
+                    && !filtering && !fileShowIsVisible() && !sameEntryList(state.list, localListArray))
                     restoreLocalFull()
             }, 50)
             return
         }
-        if (state.list === localListArray)
+        if (sameEntryList(state.list, localListArray)) {
+            localListArray = state.list
             return
+        }
         renderLocalPage(activePage)
     })
 
